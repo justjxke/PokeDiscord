@@ -13,6 +13,7 @@ BACKEND_PORT="3000"
 WORKER_NAME="poke-discord-bridge"
 DEFAULT_TUNNEL_NAME="poke-discord-bridge"
 DEFAULT_WORKERS_SUBDOMAIN="pokediscord"
+POKE_RECIPE_LINK="https://poke.com/refer/w1uUvXkX0m5"
 
 log() {
   printf '\n[poke-discord-bridge] %s\n' "$*"
@@ -267,7 +268,8 @@ main() {
   launch_agent "com.pokediscord.tunnel" "$TUNNEL_PLIST"
 
   log "Done."
-  printf '\nPublic MCP URL: https://poke-discord-bridge.%s.workers.dev/mcp\n' "$WORKERS_SUBDOMAIN"
+  printf '\nPoke recipe link: %s\n' "$POKE_RECIPE_LINK"
+  printf 'Public MCP URL: https://poke-discord-bridge.%s.workers.dev/mcp\n' "$WORKERS_SUBDOMAIN"
   printf 'Backend hostname: https://%s\n' "$BACKEND_HOSTNAME"
   printf 'Next step in Poke Kitchen: save the integration, then refresh the connection.\n'
 }

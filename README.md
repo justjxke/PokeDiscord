@@ -89,7 +89,13 @@ If you want Poke to call the bridge back into Discord, the MCP endpoint must be 
 3. Set `POKE_BACKEND_ORIGIN` for the Worker to that public origin.
 4. Set `POKE_EDGE_SECRET` to the same value on both sides.
 5. Deploy the Worker from `worker/`.
-6. Add this URL in Poke Kitchen:
+6. Open the Poke recipe link if you need the app integration entry:
+
+```text
+https://poke.com/refer/w1uUvXkX0m5
+```
+
+7. Add this Worker URL in Poke Kitchen:
 
 ```text
 https://poke-discord-bridge.pokediscord.workers.dev/mcp
@@ -104,6 +110,8 @@ npx wrangler deploy
 ```
 
 If your backend origin changes, update `worker/wrangler.toml` or the Worker variables in the Cloudflare dashboard.
+
+If you are starting from scratch, use the recipe link above first, then create or refresh the integration in Poke Kitchen.
 
 Without the Cloudflare path, Poke can't send messages to Discord from your local bot, it will not be able to call `sendDiscordMessage` back through MCP.
 
