@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
 import { loadConfig } from "./config";
-import { startDiscordBot, sendDiscordMessage } from "./discordBot";
+import { startDiscordBot, startTypingIndicator, sendDiscordMessage, sendDiscordReaction, editDiscordMessage, deleteDiscordMessage } from "./discordBot";
 import { startMcpServer } from "./mcp";
 import { loadState, saveState, type BridgeState } from "./state";
-import type { DiscordReplyTarget, DiscordRelayRequest } from "./types";
+import type { DiscordReplyTarget, DiscordRelayRequest, DiscordSentMessageRecord } from "./types";
 import { sendToPoke } from "./pokeClient";
 
 const PENDING_TARGET_TTL_MS = 30 * 60 * 1000;
@@ -39,6 +39,31 @@ function cleanupPendingTargets(targets: Map<string, DiscordReplyTarget>): void {
   }
 }
 
+function rememberSentMessages(targets: Map<string, DiscordSentMessageRecord>, bridgeRequestId: string | undefined, channelId: string, messageIds: string[]): void {
+  if (!bridgeRequestId || !messageIds.length) return;
+
+  const existing = targets.get(bridgeRequestId);
+  if (existing) {
+    existing.channelId = channelId;
+    existing.messageIds.push(...messageIds);
+    existing.updatedAt = Date.now();
+    return;
+  }
+
+  targets.set(bridgeRequestId, {
+    channelId,
+    messageIds: [...messageIds],
+    updatedAt: Date.now()
+  });
+}
+
+function cleanupSentMessages(targets: Map<string, DiscordSentMessageRecord>): void {
+  const cutoff = Date.now() - PENDING_TARGET_TTL_MS;
+  for (const [bridgeRequestId, record] of targets) {
+    if (record.updatedAt < cutoff) targets.delete(bridgeRequestId);
+  }
+}
+
 function resolveReplyTarget(targets: Map<string, DiscordReplyTarget>, meta?: { channelId?: string; bridgeRequestId?: string; }, fallbackChannelId?: string | null): string {
   if (meta?.channelId) return meta.channelId;
   if (meta?.bridgeRequestId) {
@@ -53,10 +78,32 @@ function resolveReplyTarget(targets: Map<string, DiscordReplyTarget>, meta?: { c
   throw new Error("Discord reply target not found.");
 }
 
+function resolveSentMessageTarget(targets: Map<string, DiscordSentMessageRecord>, meta?: { channelId?: string; bridgeRequestId?: string; messageId?: string; }, fallbackChannelId?: string | null): { channelId: string; messageId: string; } {
+  if (meta?.messageId && meta?.channelId) return { channelId: meta.channelId, messageId: meta.messageId };
+  if (meta?.bridgeRequestId) {
+    const record = targets.get(meta.bridgeRequestId);
+    if (record) {
+      const messageId = meta.messageId ?? (record.messageIds.length === 1 ? record.messageIds[0] : null);
+      if (messageId) return { channelId: record.channelId, messageId };
+      throw new Error("Multiple Discord messages were sent for that request; provide messageId.");
+    }
+  }
+  if (meta?.messageId && fallbackChannelId) return { channelId: fallbackChannelId, messageId: meta.messageId };
+  if (targets.size === 1) {
+    const onlyTarget = targets.values().next().value;
+    if (onlyTarget) {
+      const messageId = meta?.messageId ?? (onlyTarget.messageIds.length === 1 ? onlyTarget.messageIds[0] : null);
+      if (messageId) return { channelId: onlyTarget.channelId, messageId };
+    }
+  }
+  throw new Error("Discord message target not found.");
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const state = await loadState(config.statePath);
   const pendingTargets = new Map<string, DiscordReplyTarget>();
+  const sentMessages = new Map<string, DiscordSentMessageRecord>();
   let discordClient: Awaited<ReturnType<typeof startDiscordBot>> | null = null;
   let tunnelProcess: ChildProcess | null = null;
 
@@ -76,7 +123,29 @@ async function main(): Promise<void> {
     onSendDiscordMessage: async (content, meta) => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
       const channelId = resolveReplyTarget(pendingTargets, meta, state.dmChannelId);
-      await sendDiscordMessage(discordClient, channelId, content);
+      const messageIds = await sendDiscordMessage(discordClient, channelId, content, {
+        replyToMessageId: meta?.replyToMessageId,
+        attachments: meta?.attachments,
+        embeds: meta?.embeds
+      });
+      rememberSentMessages(sentMessages, meta?.bridgeRequestId, channelId, messageIds);
+      return messageIds;
+    },
+    onEditDiscordMessage: async meta => {
+      if (discordClient == null) throw new Error("Discord client is not ready.");
+      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.dmChannelId);
+      await editDiscordMessage(discordClient, channelId, messageId, meta.content, meta.embeds);
+    },
+    onDeleteDiscordMessage: async meta => {
+      if (discordClient == null) throw new Error("Discord client is not ready.");
+      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.dmChannelId);
+      await deleteDiscordMessage(discordClient, channelId, messageId);
+    },
+    onReactDiscordMessage: async meta => {
+      if (discordClient == null) throw new Error("Discord client is not ready.");
+      const channelId = resolveReplyTarget(pendingTargets, meta, state.dmChannelId);
+      if (!meta.messageId) throw new Error("Discord message id is required.");
+      await sendDiscordReaction(discordClient, channelId, meta.messageId, meta.emoji);
     }
   });
 
@@ -85,16 +154,29 @@ async function main(): Promise<void> {
 
   discordClient = await startDiscordBot(config, state, async next => persistState(next), async request => {
     rememberPendingTarget(pendingTargets, request);
+
+    let stopTyping: (() => Promise<void>) | null = null;
+    try {
+      stopTyping = await startTypingIndicator(discordClient!, request.replyTarget.channelId);
+    } catch {
+      stopTyping = null;
+    }
+
     try {
       return await sendToPoke(config, request);
     } catch (error) {
       pendingTargets.delete(request.bridgeRequestId);
       throw error;
+    } finally {
+      await stopTyping?.();
     }
   });
   log(`Discord connected as ${discordClient.user?.tag ?? "unknown"}`);
 
-  const cleanupInterval = setInterval(() => cleanupPendingTargets(pendingTargets), PENDING_TARGET_CLEANUP_MS);
+  const cleanupInterval = setInterval(() => {
+    cleanupPendingTargets(pendingTargets);
+    cleanupSentMessages(sentMessages);
+  }, PENDING_TARGET_CLEANUP_MS);
 
   const shutdown = async () => {
     log("Shutting down...");

@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { ApplicationIntegrationType, Client, GatewayIntentBits, InteractionContextType, Partials, SlashCommandBuilder, type ChatInputCommandInteraction, type Message } from "discord.js";
+import { ApplicationIntegrationType, AttachmentBuilder, Client, EmbedBuilder, GatewayIntentBits, InteractionContextType, Partials, SlashCommandBuilder, type ChatInputCommandInteraction, type Message } from "discord.js";
 
 import { buildDiscordRelayPrompt } from "./prompt";
 import { linkState, rememberMessageId, type BridgeState } from "./state";
-import type { BridgeConfig, DiscordAttachmentContext, DiscordMessageContext, DiscordReplyTarget, DiscordRelayRequest, PokeSendResult } from "./types";
+import type { BridgeConfig, DiscordAttachmentContext, DiscordMessageContext, DiscordOutboundAttachment, DiscordOutboundEmbed, DiscordReplyTarget, DiscordRelayRequest, PokeSendResult } from "./types";
 
 const SERVER_ATTACHMENT_OPTION_COUNT = 5;
 const COMMAND_PREFIX = "!";
@@ -13,8 +13,12 @@ function isDmMessage(message: Message): boolean {
   return message.guildId == null;
 }
 
-function isSendableChannel(channel: unknown): channel is { send: (content: string) => Promise<unknown>; isTextBased: () => boolean; } {
+function isSendableChannel(channel: unknown): channel is { send: (content: string | { content?: string; reply?: { messageReference: string; failIfNotExists: boolean; }; files?: AttachmentBuilder[]; embeds?: EmbedBuilder[]; }) => Promise<{ id: string }>; isTextBased: () => boolean; } {
   return typeof channel === "object" && channel != null && "send" in channel && typeof (channel as { send?: unknown }).send === "function";
+}
+
+function isTypingChannel(channel: unknown): channel is { isTextBased: () => boolean; sendTyping: () => Promise<unknown>; } {
+  return typeof channel === "object" && channel != null && "sendTyping" in channel && typeof (channel as { sendTyping?: unknown }).sendTyping === "function";
 }
 
 function formatAttachment(attachment: { name: string; url: string; contentType?: string | null; size: number; }): DiscordAttachmentContext {
@@ -53,7 +57,57 @@ function buildReplyTarget(channelId: string, label: string | null, mode: Discord
   };
 }
 
-async function sendChunks(channel: { send: (content: string) => Promise<unknown>; }, content: string): Promise<void> {
+function guessAttachmentName(url: string): string {
+  try {
+    const pathname = new URL(url).pathname;
+    const name = pathname.split("/").filter(Boolean).pop();
+    return name?.trim() || "attachment";
+  } catch {
+    return "attachment";
+  }
+}
+
+async function buildAttachmentBuilders(attachments: DiscordOutboundAttachment[]): Promise<AttachmentBuilder[]> {
+  const built = await Promise.all(attachments.map(async attachment => {
+    const response = await fetch(attachment.url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch attachment ${attachment.url}: ${response.status}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const name = attachment.name?.trim() || guessAttachmentName(attachment.url);
+    return new AttachmentBuilder(buffer, { name });
+  }));
+
+  return built;
+}
+
+function buildEmbedBuilder(embed: DiscordOutboundEmbed): EmbedBuilder {
+  const builder = new EmbedBuilder();
+
+  if (embed.title) builder.setTitle(embed.title);
+  if (embed.description) builder.setDescription(embed.description);
+  if (embed.url) builder.setURL(embed.url);
+  if (typeof embed.color === "number") builder.setColor(embed.color);
+  if (embed.timestamp) builder.setTimestamp(new Date(embed.timestamp));
+  if (embed.footer) builder.setFooter({ text: embed.footer.text, iconURL: embed.footer.iconUrl });
+  if (embed.author) builder.setAuthor({ name: embed.author.name, url: embed.author.url, iconURL: embed.author.iconUrl });
+  if (embed.thumbnailUrl) builder.setThumbnail(embed.thumbnailUrl);
+  if (embed.imageUrl) builder.setImage(embed.imageUrl);
+  if (embed.fields?.length) {
+    builder.setFields(embed.fields.map(field => ({ name: field.name, value: field.value, inline: field.inline ?? false })));
+  }
+
+  return builder;
+}
+
+interface OutboundMessageOptions {
+  replyToMessageId?: string;
+  attachments?: DiscordOutboundAttachment[];
+  embeds?: DiscordOutboundEmbed[];
+}
+
+async function sendChunks(channel: { send: (content: string | { content?: string; reply?: { messageReference: string; failIfNotExists: boolean; }; files?: AttachmentBuilder[]; embeds?: EmbedBuilder[]; }) => Promise<{ id: string }>; }, content: string, options: OutboundMessageOptions = {}): Promise<string[]> {
   const chunks: string[] = [];
   let remaining = content;
 
@@ -64,17 +118,54 @@ async function sendChunks(channel: { send: (content: string) => Promise<unknown>
     remaining = remaining.slice(splitAt).replace(/^\n+/, "");
   }
 
-  if (remaining.length) chunks.push(remaining);
+  if (remaining.length || !chunks.length) chunks.push(remaining);
 
-  for (const chunk of chunks) {
-    await channel.send(chunk);
+  const builtAttachments = options.attachments?.length ? await buildAttachmentBuilders(options.attachments) : [];
+  const builtEmbeds = options.embeds?.map(buildEmbedBuilder) ?? [];
+  const messageIds: string[] = [];
+
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index] ?? "";
+    const payload: { content?: string; reply?: { messageReference: string; failIfNotExists: boolean; }; files?: AttachmentBuilder[]; embeds?: EmbedBuilder[]; } = {};
+
+    if (chunk.length) payload.content = chunk;
+    if (index === 0 && options.replyToMessageId) {
+      payload.reply = {
+        messageReference: options.replyToMessageId,
+        failIfNotExists: false
+      };
+    }
+    if (index === 0 && builtAttachments.length) payload.files = builtAttachments;
+    if (index === 0 && builtEmbeds.length) payload.embeds = builtEmbeds;
+
+    const sent = await channel.send(payload);
+    messageIds.push(sent.id);
   }
+
+  return messageIds;
 }
 
 function readCommand(content: string): string | null {
   const trimmed = content.trim();
   if (!trimmed.startsWith(COMMAND_PREFIX)) return null;
   return trimmed.slice(1).split(/\s+/, 1)[0]?.toLowerCase() ?? null;
+}
+
+function stripBotMentions(content: string, botUserId: string): string {
+  const mentionPattern = new RegExp(`^<@!?${botUserId}>\\s*`, "g");
+  return content.replace(mentionPattern, "").trim();
+}
+
+async function isReplyToBotMessage(message: Message, botUserId: string): Promise<boolean> {
+  const referenceId = message.reference?.messageId;
+  if (!referenceId || !message.channel || !message.channel.isTextBased() || !("messages" in message.channel)) return false;
+
+  try {
+    const referenced = await message.channel.messages.fetch(referenceId);
+    return referenced.author.id === botUserId;
+  } catch {
+    return false;
+  }
 }
 
 async function collectChannelContext(channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined, limit: number): Promise<DiscordMessageContext[]> {
@@ -96,7 +187,7 @@ async function collectChannelContext(channel: Message["channel"] | ChatInputComm
   }
 }
 
-async function buildDiscordRequestFromMessage(config: BridgeConfig, state: BridgeState, message: Message): Promise<DiscordRelayRequest> {
+async function buildDiscordRequestFromMessage(config: BridgeConfig, state: BridgeState, message: Message, promptContent = message.content): Promise<DiscordRelayRequest> {
   const attachments = getMessageAttachments(message);
   const contextMessages = message.channelId === state.dmChannelId ? [] : await collectChannelContext(message.channel, config.contextMessageCount);
   const replyTarget = buildReplyTarget(message.channelId, isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel), isDmMessage(message) ? "dm" : "guild");
@@ -107,7 +198,7 @@ async function buildDiscordRequestFromMessage(config: BridgeConfig, state: Bridg
     discordChannelId: message.channelId,
     discordMessageId: message.id,
     mode: isDmMessage(message) ? "dm" : "guild",
-    prompt: message.content,
+    prompt: promptContent,
     replyTarget,
     attachments,
     contextMessages
@@ -167,41 +258,44 @@ export async function startDiscordBot(
   onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>
 ): Promise<Client> {
   const client = new Client({
-    intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent],
+    intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessages],
     partials: [Partials.Channel]
   });
 
   client.on("messageCreate", async message => {
-    if (message.author.bot || !isDmMessage(message)) return;
+    if (message.author.bot) return;
 
-    const command = readCommand(message.content);
-    if (command === "status") {
-      await message.channel.send(state.ownerUserId
-        ? `Linked to <@${state.ownerUserId}>.`
-        : "Not linked yet.");
-      return;
-    }
-
-    if (command === "reset") {
-      state.ownerUserId = null;
-      state.dmChannelId = null;
-      state.linkedAt = null;
-      state.recentMessageIds = [];
-      await updateState(state);
-      await message.channel.send("Bridge reset.");
-      return;
-    }
-
-    if (state.ownerUserId == null) {
-      const linked = linkState(state, message.author.id, message.channel.id);
-      Object.assign(state, linked);
-      await updateState(state);
-    }
-
-    if (state.ownerUserId !== message.author.id) return;
-    if (state.dmChannelId !== message.channel.id) {
-      state.dmChannelId = message.channel.id;
-      await updateState(state);
+    if (message.guildId == null) {
+      const command = readCommand(message.content);
+      if (command === "status") {
+        await message.channel.send(state.ownerUserId ? `Linked to <@${state.ownerUserId}>.` : "Not linked yet.");
+        return;
+      }
+      if (command === "reset") {
+        state.ownerUserId = null;
+        state.dmChannelId = null;
+        state.linkedAt = null;
+        state.recentMessageIds = [];
+        await updateState(state);
+        await message.channel.send("Bridge reset.");
+        return;
+      }
+      if (state.ownerUserId == null) {
+        const linked = linkState(state, message.author.id, message.channel.id);
+        Object.assign(state, linked);
+        await updateState(state);
+      }
+      if (state.ownerUserId !== message.author.id) return;
+      if (state.dmChannelId !== message.channel.id) {
+        state.dmChannelId = message.channel.id;
+        await updateState(state);
+      }
+    } else {
+      const botUserId = client.user?.id;
+      if (!botUserId) return;
+      const mentioned = message.mentions.users.has(botUserId);
+      const repliedToBot = await isReplyToBotMessage(message, botUserId);
+      if (!mentioned && !repliedToBot) return;
     }
 
     if (state.recentMessageIds.includes(message.id)) return;
@@ -209,7 +303,9 @@ export async function startDiscordBot(
     await updateState(state);
 
     try {
-      const request = await buildDiscordRequestFromMessage(config, state, message);
+      const botUserId = client.user?.id;
+      const promptContent = message.guildId == null || !botUserId ? message.content : stripBotMentions(message.content, botUserId);
+      const request = await buildDiscordRequestFromMessage(config, state, message, promptContent);
       request.prompt = buildDiscordRelayPrompt(request);
       await onRelayRequest(request);
     } catch (error) {
@@ -259,11 +355,74 @@ export async function startDiscordBot(
   return client;
 }
 
-export async function sendDiscordMessage(client: Client, channelId: string, content: string): Promise<void> {
+function isReactableMessage(message: unknown): message is { react: (emoji: string) => Promise<unknown>; } {
+  return typeof message === "object" && message != null && "react" in message && typeof (message as { react?: unknown }).react === "function";
+}
+
+export async function sendDiscordMessage(client: Client, channelId: string, content: string, options: OutboundMessageOptions = {}): Promise<string[]> {
   const channel = await client.channels.fetch(channelId);
   if (!isSendableChannel(channel) || !channel.isTextBased()) {
     throw new Error("Discord channel not found.");
   }
 
-  await sendChunks(channel, content);
+  return sendChunks(channel, content, options);
+}
+
+export async function editDiscordMessage(client: Client, channelId: string, messageId: string, content?: string, embeds?: DiscordOutboundEmbed[]): Promise<void> {
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased() || !("messages" in channel)) {
+    throw new Error("Discord channel not found.");
+  }
+
+  const message = await channel.messages.fetch(messageId);
+  await message.edit({ content, ...(embeds?.length ? { embeds: embeds.map(buildEmbedBuilder) } : {}) });
+}
+
+export async function deleteDiscordMessage(client: Client, channelId: string, messageId: string): Promise<void> {
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased() || !("messages" in channel)) {
+    throw new Error("Discord channel not found.");
+  }
+
+  const message = await channel.messages.fetch(messageId);
+  await message.delete();
+}
+
+export async function sendDiscordReaction(client: Client, channelId: string, messageId: string, emoji: string): Promise<void> {
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased() || !("messages" in channel)) {
+    throw new Error("Discord channel not found.");
+  }
+
+  const message = await channel.messages.fetch(messageId);
+  if (!isReactableMessage(message)) {
+    throw new Error("Discord message cannot be reacted to.");
+  }
+
+  await message.react(emoji);
+}
+
+export async function startTypingIndicator(client: Client, channelId: string): Promise<() => Promise<void>> {
+  const channel = await client.channels.fetch(channelId);
+  if (!isTypingChannel(channel)) {
+    throw new Error("Discord channel not found.");
+  }
+
+  let stopped = false;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      await channel.sendTyping();
+    } catch {
+      // Ignore typing failures; they are best-effort only.
+    }
+  };
+
+  await tick();
+  const interval = setInterval(() => void tick(), 8000);
+
+  return async () => {
+    stopped = true;
+    clearInterval(interval);
+  };
 }

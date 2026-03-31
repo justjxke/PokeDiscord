@@ -5,7 +5,7 @@ export interface WorkerEnv {
 
 const EDGE_SECRET_HEADER = "x-poke-edge-secret";
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id, X-Poke-Edge-Secret";
-const ENDPOINT_PATH = "/messages/";
+const ENDPOINT_PATH = "/messages";
 
 function plainResponse(message: string, status: number): Response {
   return new Response(message, {

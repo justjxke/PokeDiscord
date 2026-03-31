@@ -35,13 +35,18 @@ export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
     `Discord user id: ${request.discordUserId}`,
     `Discord channel id: ${request.discordChannelId}`,
     `Message id: ${request.discordMessageId}`,
+    request.mode === "guild" ? "Any server member may mention or reply to Poke in guild channels." : null,
     "",
     "User message:",
     request.prompt.trim(),
     ...formatAttachments("Attachments:", request.attachments),
     ...(request.contextMessages.length ? ["", "Recent channel context:", ...request.contextMessages.slice(-MAX_CONTEXT_LINES).map((entry, index) => formatContextLine(index, entry))] : []),
     "",
-    "When you want to reply in Discord, call sendDiscordMessage with the same bridge request id and the reply target channel id from above."
+    "When you want to send a plain Discord message, call sendDiscordMessage with the same bridge request id and the reply target channel id from above. You may include attachments and embeds.",
+    "When you want to reply to a specific Discord message, call replyToDiscordMessage with the message id you want to reply to. You may include attachments and embeds.",
+    "When you want to edit a message the bridge already sent, call editDiscordMessage with the message id and new content or embeds.",
+    "When you want to delete a message the bridge already sent, call deleteDiscordMessage with the message id.",
+    "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id."
   ];
 
   return lines.filter((line): line is string => line != null).join("\n");

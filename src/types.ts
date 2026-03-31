@@ -24,6 +24,31 @@ export interface DiscordAttachmentContext {
   size: number;
 }
 
+export interface DiscordOutboundAttachment {
+  name?: string;
+  url: string;
+  contentType?: string | null;
+}
+
+export interface DiscordEmbedField {
+  name: string;
+  value: string;
+  inline?: boolean;
+}
+
+export interface DiscordOutboundEmbed {
+  title?: string;
+  description?: string;
+  url?: string;
+  color?: number;
+  timestamp?: string;
+  footer?: { text: string; iconUrl?: string; };
+  author?: { name: string; url?: string; iconUrl?: string; };
+  thumbnailUrl?: string;
+  imageUrl?: string;
+  fields?: DiscordEmbedField[];
+}
+
 export interface DiscordMessageContext {
   authorId: string;
   authorName: string;
@@ -37,6 +62,12 @@ export interface DiscordReplyTarget {
   label: string | null;
   mode: "dm" | "guild";
   createdAt: number;
+}
+
+export interface DiscordSentMessageRecord {
+  channelId: string;
+  messageIds: string[];
+  updatedAt: number;
 }
 
 export interface DiscordRelayRequest {
