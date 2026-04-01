@@ -65,14 +65,18 @@ async function proxyRequest(request: Request, env: WorkerEnv, fetchImpl: typeof 
   }
 
   const backendUrl = buildBackendUrl(publicUrl, backendOrigin);
+  const path = publicUrl.pathname;
+  const isMcpRoute = path === "/mcp" || path === "/mcp/";
+  const isSseRoute = path === "/sse" || path === "/sse/";
+  const isMessagesRoute = path === "/messages" || path === "/messages/";
   const headers = new Headers(request.headers);
   addSecret(headers, env.POKE_EDGE_SECRET);
 
-  if (request.method === "GET" && (publicUrl.pathname === "/mcp" || publicUrl.pathname === "/sse")) {
+  if (request.method === "GET" && (isMcpRoute || isSseRoute)) {
     return buildEndpointResponse(publicUrl);
   }
 
-  if (request.method === "POST" && (publicUrl.pathname === "/mcp" || publicUrl.pathname === "/messages")) {
+  if (request.method === "POST" && (isMcpRoute || isMessagesRoute)) {
     const body = await request.text();
     return fetchImpl(backendUrl.toString(), {
       method: request.method,
@@ -81,7 +85,7 @@ async function proxyRequest(request: Request, env: WorkerEnv, fetchImpl: typeof 
     });
   }
 
-  if (publicUrl.pathname === "/health" || publicUrl.pathname === "/messages") {
+  if (path === "/health" || isMessagesRoute) {
     return fetchImpl(backendUrl.toString(), { method: request.method, headers });
   }
 

@@ -9,10 +9,33 @@ import { sendToPoke } from "./pokeClient";
 
 const PENDING_TARGET_TTL_MS = 30 * 60 * 1000;
 const PENDING_TARGET_CLEANUP_MS = 5 * 60 * 1000;
+const HOST_URL_HINT_KEYS = [
+  "PUBLIC_URL",
+  "APP_URL",
+  "APP_BASE_URL",
+  "SERVICE_URL",
+  "WEB_URL",
+  "EXTERNAL_URL",
+  "PUBLIC_HOSTNAME",
+  "HOSTNAME"
+] as const;
 
 const log = (message: string) => {
   process.stdout.write(`[poke-discord-bridge] ${message}\n`);
 };
+
+function logHostUrlHints(): void {
+  const hints = HOST_URL_HINT_KEYS
+    .map(key => [key, process.env[key]] as const)
+    .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+    .map(([key, value]) => `${key}=${value?.trim()}`);
+
+  if (hints.length > 0) {
+    log(`Host URL hints: ${hints.join(", ")}`);
+  } else {
+    log("Host URL hints: none");
+  }
+}
 
 async function startTunnel(port: number, enabled: boolean): Promise<ChildProcess | null> {
   if (!enabled) return null;
@@ -151,6 +174,7 @@ async function main(): Promise<void> {
 
   log(`MCP server listening on http://${config.mcpHost}:${mcp.port}`);
   log(`Bridge mode: ${config.bridgeMode}`);
+  logHostUrlHints();
   tunnelProcess = await startTunnel(mcp.port, config.autoTunnel && config.edgeSecret == null);
 
   discordClient = await startDiscordBot(config, state, async next => persistState(next), async request => {
