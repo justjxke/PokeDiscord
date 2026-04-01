@@ -1,4 +1,5 @@
 .env
+.env.private
 .env.bak.*
 node_modules
 dist
