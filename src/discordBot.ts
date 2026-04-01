@@ -1,12 +1,36 @@
 import { randomUUID } from "node:crypto";
 
-import { ApplicationIntegrationType, AttachmentBuilder, Client, EmbedBuilder, GatewayIntentBits, InteractionContextType, Partials, SlashCommandBuilder, type ChatInputCommandInteraction, type Message } from "discord.js";
+import {
+  ApplicationIntegrationType,
+  AttachmentBuilder,
+  ChannelType,
+  Client,
+  EmbedBuilder,
+  GatewayIntentBits,
+  InteractionContextType,
+  Partials,
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction,
+  type GuildTextBasedChannel,
+  type Message
+} from "discord.js";
 
+import { installGuildChannel, isGuildChannelAllowed, removeGuildInstallation } from "./bridgePolicy";
 import { buildDiscordRelayPrompt } from "./prompt";
-import { linkState, rememberMessageId, type BridgeState } from "./state";
-import type { BridgeConfig, DiscordAttachmentContext, DiscordMessageContext, DiscordOutboundAttachment, DiscordOutboundEmbed, DiscordReplyTarget, DiscordRelayRequest, PokeSendResult } from "./types";
+import { rememberMessageId, type BridgeState } from "./state";
+import type {
+  BridgeConfig,
+  DiscordAttachmentContext,
+  DiscordMessageContext,
+  DiscordOutboundAttachment,
+  DiscordOutboundEmbed,
+  DiscordReplyTarget,
+  DiscordRelayRequest,
+  PokeSendResult
+} from "./types";
 
 const SERVER_ATTACHMENT_OPTION_COUNT = 5;
+const COMMAND_NAME = "poke";
 const COMMAND_PREFIX = "!";
 
 function isDmMessage(message: Message): boolean {
@@ -187,9 +211,32 @@ async function collectChannelContext(channel: Message["channel"] | ChatInputComm
   }
 }
 
+function setPrivateLink(state: BridgeState, userId: string, channelId: string): BridgeState {
+  return {
+    ...state,
+    private: {
+      ownerUserId: userId,
+      dmChannelId: channelId,
+      linkedAt: Date.now()
+    }
+  };
+}
+
+function resetPrivateLink(state: BridgeState): BridgeState {
+  return {
+    ...state,
+    private: {
+      ownerUserId: null,
+      dmChannelId: null,
+      linkedAt: null
+    },
+    recentMessageIds: []
+  };
+}
+
 async function buildDiscordRequestFromMessage(config: BridgeConfig, state: BridgeState, message: Message, promptContent = message.content): Promise<DiscordRelayRequest> {
   const attachments = getMessageAttachments(message);
-  const contextMessages = message.channelId === state.dmChannelId ? [] : await collectChannelContext(message.channel, config.contextMessageCount);
+  const contextMessages = message.channelId === state.private.dmChannelId ? [] : await collectChannelContext(message.channel, config.contextMessageCount);
   const replyTarget = buildReplyTarget(message.channelId, isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel), isDmMessage(message) ? "dm" : "guild");
 
   return {
@@ -205,50 +252,59 @@ async function buildDiscordRequestFromMessage(config: BridgeConfig, state: Bridg
   };
 }
 
-async function buildDiscordRequestFromInteraction(config: BridgeConfig, interaction: ChatInputCommandInteraction): Promise<DiscordRelayRequest> {
-  const attachments = getCommandAttachments(interaction);
-  const contextMessages = await collectChannelContext(interaction.channel, config.contextMessageCount);
-  const replyTarget = buildReplyTarget(interaction.channelId, getChannelLabel(interaction.channel) ?? "Server channel", "guild");
-
-  return {
-    bridgeRequestId: randomUUID(),
-    discordUserId: interaction.user.id,
-    discordChannelId: interaction.channelId,
-    discordMessageId: interaction.id,
-    mode: "guild",
-    prompt: interaction.options.getString("message", true),
-    replyTarget,
-    attachments,
-    contextMessages
-  };
-}
-
 function createSlashCommand() {
   const command = new SlashCommandBuilder()
-    .setName("poke")
-    .setDescription("Send a message to Poke.")
-    .setContexts([InteractionContextType.Guild])
-    .setIntegrationTypes([ApplicationIntegrationType.GuildInstall])
-    .setDMPermission(false)
-    .addStringOption(option => option
-      .setName("message")
-      .setDescription("The message to send to Poke.")
-      .setRequired(true));
+    .setName(COMMAND_NAME)
+    .setDescription("Send a message to Poke.");
 
-  for (let index = 1; index <= SERVER_ATTACHMENT_OPTION_COUNT; index++) {
-    command.addAttachmentOption(option => option
-      .setName(`attachment${index}`)
-      .setDescription(index === 1 ? "Optional attachment." : `Optional attachment ${index}.`)
-      .setRequired(false));
-  }
+  command
+    .addSubcommand(subcommand => subcommand
+      .setName("send")
+      .setDescription("Send a message to Poke.")
+      .addStringOption(option => option
+        .setName("message")
+        .setDescription("The message to send to Poke.")
+        .setRequired(true))
+      .addAttachmentOption(option => option.setName("attachment1").setDescription("Optional attachment.").setRequired(false))
+      .addAttachmentOption(option => option.setName("attachment2").setDescription("Optional attachment 2.").setRequired(false))
+      .addAttachmentOption(option => option.setName("attachment3").setDescription("Optional attachment 3.").setRequired(false))
+      .addAttachmentOption(option => option.setName("attachment4").setDescription("Optional attachment 4.").setRequired(false))
+      .addAttachmentOption(option => option.setName("attachment5").setDescription("Optional attachment 5.").setRequired(false)))
+    .addSubcommand(subcommand => subcommand
+      .setName("setup")
+      .setDescription("Enable Poke in this server channel.")
+      .addChannelOption(option => option
+        .setName("channel")
+        .setDescription("Channel to enable. Defaults to the current channel.")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(false)))
+    .addSubcommand(subcommand => subcommand
+      .setName("status")
+      .setDescription("Show the current bridge status."))
+    .addSubcommand(subcommand => subcommand
+      .setName("reset")
+      .setDescription("Reset the current bridge link or server installation."));
 
-  return command;
+  return command.setContexts([InteractionContextType.Guild]).setIntegrationTypes([ApplicationIntegrationType.GuildInstall]).setDMPermission(false);
 }
 
 async function registerCommands(client: Client): Promise<void> {
   const application = await client.application?.fetch();
   if (!application) return;
   await application.commands.set([createSlashCommand()]);
+}
+
+function canManageGuildInstallation(interaction: ChatInputCommandInteraction): boolean {
+  if (!interaction.inGuild()) return false;
+  if (interaction.guild?.ownerId === interaction.user.id) return true;
+  return interaction.memberPermissions?.has("Administrator") ?? false;
+}
+
+function formatGuildInstallationStatus(state: BridgeState, guildId: string): string {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return "This server is not set up yet.";
+  if (!installation.allowedChannelIds.length) return "This server is installed, but no channels are enabled.";
+  return `Enabled in ${installation.allowedChannelIds.map(channelId => `<#${channelId}>`).join(", ")}.`;
 }
 
 export async function startDiscordBot(
@@ -266,36 +322,48 @@ export async function startDiscordBot(
     if (message.author.bot) return;
 
     if (message.guildId == null) {
+      if (config.bridgeMode === "public") {
+        const command = readCommand(message.content);
+        if (command === "status") {
+          await message.channel.send("This bot is running in public mode. Use /poke setup in a server to enable it.");
+        }
+        return;
+      }
+
       const command = readCommand(message.content);
       if (command === "status") {
-        await message.channel.send(state.ownerUserId ? `Linked to <@${state.ownerUserId}>.` : "Not linked yet.");
+        await message.channel.send(state.private.ownerUserId ? `Linked to <@${state.private.ownerUserId}>.` : "Not linked yet.");
         return;
       }
       if (command === "reset") {
-        state.ownerUserId = null;
-        state.dmChannelId = null;
-        state.linkedAt = null;
-        state.recentMessageIds = [];
+        Object.assign(state, resetPrivateLink(state));
         await updateState(state);
         await message.channel.send("Bridge reset.");
         return;
       }
-      if (state.ownerUserId == null) {
-        const linked = linkState(state, message.author.id, message.channel.id);
+      if (state.private.ownerUserId == null) {
+        const linked = setPrivateLink(state, message.author.id, message.channel.id);
         Object.assign(state, linked);
         await updateState(state);
       }
-      if (state.ownerUserId !== message.author.id) return;
-      if (state.dmChannelId !== message.channel.id) {
-        state.dmChannelId = message.channel.id;
+      if (state.private.ownerUserId !== message.author.id) return;
+      if (state.private.dmChannelId !== message.channel.id) {
+        state.private.dmChannelId = message.channel.id;
         await updateState(state);
       }
     } else {
       const botUserId = client.user?.id;
       if (!botUserId) return;
+
+      if (config.bridgeMode === "public") {
+        if (!isGuildChannelAllowed(state, message.guildId, message.channelId)) return;
+      }
+
       const mentioned = message.mentions.users.has(botUserId);
       const repliedToBot = await isReplyToBotMessage(message, botUserId);
       if (!mentioned && !repliedToBot) return;
+
+      if (config.bridgeMode === "private" && state.private.ownerUserId != null && message.author.id !== state.private.ownerUserId) return;
     }
 
     if (state.recentMessageIds.includes(message.id)) return;
@@ -306,7 +374,7 @@ export async function startDiscordBot(
       const botUserId = client.user?.id;
       const promptContent = message.guildId == null || !botUserId ? message.content : stripBotMentions(message.content, botUserId);
       const request = await buildDiscordRequestFromMessage(config, state, message, promptContent);
-      request.prompt = buildDiscordRelayPrompt(request);
+      request.prompt = buildDiscordRelayPrompt(request, config.bridgeMode);
       await onRelayRequest(request);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -315,16 +383,100 @@ export async function startDiscordBot(
   });
 
   client.on("interactionCreate", async interaction => {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== "poke") return;
-    if (!interaction.inGuild()) {
-      await interaction.reply({ content: "Use /poke in a server.", ephemeral: true });
+    if (!interaction.isChatInputCommand() || interaction.commandName !== COMMAND_NAME) return;
+
+    const subcommand = interaction.options.getSubcommand();
+
+    if (subcommand === "setup") {
+      if (!interaction.inGuild()) {
+        await interaction.reply({ content: "Use /poke setup in a server.", ephemeral: true });
+        return;
+      }
+      if (config.bridgeMode !== "public") {
+        await interaction.reply({ content: "Public setup is only available when the bridge runs in public mode.", ephemeral: true });
+        return;
+      }
+      if (!canManageGuildInstallation(interaction)) {
+        await interaction.reply({ content: "Only the server owner or an administrator can set this up.", ephemeral: true });
+        return;
+      }
+
+      const channel = interaction.options.getChannel("channel");
+      const targetChannelId = channel && typeof channel === "object" && "id" in channel ? channel.id : interaction.channelId;
+      const nextState = installGuildChannel(state, interaction.guildId, interaction.user.id, targetChannelId);
+      Object.assign(state, nextState);
+      await updateState(state);
+      await interaction.reply({ content: `Poke is now enabled in <#${targetChannelId}>.`, ephemeral: true });
       return;
     }
-    if (state.ownerUserId == null) {
+
+    if (subcommand === "status") {
+      if (!interaction.inGuild()) {
+        await interaction.reply({ content: "Use /poke status in a server.", ephemeral: true });
+        return;
+      }
+
+      if (config.bridgeMode === "public") {
+        await interaction.reply({ content: formatGuildInstallationStatus(state, interaction.guildId), ephemeral: true });
+        return;
+      }
+
+      const ownerLabel = state.private.ownerUserId ? `<@${state.private.ownerUserId}>` : "not linked yet";
+      await interaction.reply({ content: `Private bridge linked to ${ownerLabel}.`, ephemeral: true });
+      return;
+    }
+
+    if (subcommand === "reset") {
+      if (!interaction.inGuild()) {
+        await interaction.reply({ content: "Use /poke reset in a server.", ephemeral: true });
+        return;
+      }
+
+      if (config.bridgeMode === "public") {
+        if (!canManageGuildInstallation(interaction)) {
+          await interaction.reply({ content: "Only the server owner or an administrator can reset the installation.", ephemeral: true });
+          return;
+        }
+
+        const nextState = removeGuildInstallation(state, interaction.guildId);
+        Object.assign(state, nextState);
+        await updateState(state);
+        await interaction.reply({ content: "Server installation removed.", ephemeral: true });
+        return;
+      }
+
+      if (state.private.ownerUserId == null) {
+        await interaction.reply({ content: "This bridge is not linked yet.", ephemeral: true });
+        return;
+      }
+
+      if (interaction.user.id !== state.private.ownerUserId) {
+        await interaction.reply({ content: "This bridge is linked to another Discord account.", ephemeral: true });
+        return;
+      }
+
+      Object.assign(state, resetPrivateLink(state));
+      await updateState(state);
+      await interaction.reply({ content: "Private bridge reset.", ephemeral: true });
+      return;
+    }
+
+    if (subcommand !== "send") return;
+
+    if (!interaction.inGuild()) {
+      await interaction.reply({ content: "Use /poke send in a server.", ephemeral: true });
+      return;
+    }
+
+    if (config.bridgeMode === "public") {
+      if (!isGuildChannelAllowed(state, interaction.guildId, interaction.channelId)) {
+        await interaction.reply({ content: "This channel is not enabled for Poke yet.", ephemeral: true });
+        return;
+      }
+    } else if (state.private.ownerUserId == null) {
       await interaction.reply({ content: "DM me first so I know which account to use.", ephemeral: true });
       return;
-    }
-    if (interaction.user.id !== state.ownerUserId) {
+    } else if (interaction.user.id !== state.private.ownerUserId) {
       await interaction.reply({ content: "This bridge is linked to another Discord account.", ephemeral: true });
       return;
     }
@@ -333,7 +485,7 @@ export async function startDiscordBot(
 
     try {
       const request = await buildDiscordRequestFromInteraction(config, interaction);
-      request.prompt = buildDiscordRelayPrompt(request);
+      request.prompt = buildDiscordRelayPrompt(request, config.bridgeMode);
       await onRelayRequest(request);
       await interaction.editReply("Sent to Poke.");
     } catch (error) {
@@ -342,7 +494,7 @@ export async function startDiscordBot(
     }
   });
 
-  client.once("ready", async () => {
+  client.once("clientReady", async () => {
     try {
       await registerCommands(client);
     } catch (error) {
@@ -424,5 +576,23 @@ export async function startTypingIndicator(client: Client, channelId: string): P
   return async () => {
     stopped = true;
     clearInterval(interval);
+  };
+}
+
+async function buildDiscordRequestFromInteraction(config: BridgeConfig, interaction: ChatInputCommandInteraction): Promise<DiscordRelayRequest> {
+  const attachments = getCommandAttachments(interaction);
+  const contextMessages = await collectChannelContext(interaction.channel, config.contextMessageCount);
+  const replyTarget = buildReplyTarget(interaction.channelId, getChannelLabel(interaction.channel) ?? "Server channel", "guild");
+
+  return {
+    bridgeRequestId: randomUUID(),
+    discordUserId: interaction.user.id,
+    discordChannelId: interaction.channelId,
+    discordMessageId: interaction.id,
+    mode: "guild",
+    prompt: interaction.options.getString("message", true),
+    replyTarget,
+    attachments,
+    contextMessages
   };
 }

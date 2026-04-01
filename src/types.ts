@@ -1,3 +1,18 @@
+export type BridgeMode = "private" | "public";
+
+export interface PrivateBridgeState {
+  ownerUserId: string | null;
+  dmChannelId: string | null;
+  linkedAt: number | null;
+}
+
+export interface GuildInstallationState {
+  installedByUserId: string;
+  installedAt: number;
+  updatedAt: number;
+  allowedChannelIds: string[];
+}
+
 export interface BridgeConfig {
   discordToken: string;
   pokeApiKey: string;
@@ -8,12 +23,13 @@ export interface BridgeConfig {
   autoTunnel: boolean;
   contextMessageCount: number;
   edgeSecret: string | null;
+  bridgeMode: BridgeMode;
 }
 
 export interface BridgeState {
-  ownerUserId: string | null;
-  dmChannelId: string | null;
-  linkedAt: number | null;
+  mode: BridgeMode;
+  private: PrivateBridgeState;
+  guildInstallations: Record<string, GuildInstallationState>;
   recentMessageIds: string[];
 }
 

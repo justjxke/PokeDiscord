@@ -1,4 +1,5 @@
-import type { DiscordRelayRequest } from "./types";
+import { buildPromptGuardrails } from "./bridgePolicy";
+import type { BridgeMode, DiscordRelayRequest } from "./types";
 
 const MAX_CONTEXT_LINES = 40;
 
@@ -25,9 +26,10 @@ function formatContextLine(index: number, entry: DiscordRelayRequest["contextMes
   return `${index + 1}. ${entry.authorName}: ${content}${attachmentSuffix}`;
 }
 
-export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
+export function buildDiscordRelayPrompt(request: DiscordRelayRequest, bridgeMode: BridgeMode): string {
   const lines = [
     "You are responding to a Discord bridge request.",
+    ...buildPromptGuardrails(bridgeMode),
     `Bridge request id: ${request.bridgeRequestId}`,
     `Mode: ${request.mode}`,
     `Reply target channel id: ${request.replyTarget.channelId}`,
@@ -51,3 +53,4 @@ export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
 
   return lines.filter((line): line is string => line != null).join("\n");
 }
+

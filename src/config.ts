@@ -1,12 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { BridgeMode } from "./types";
 import type { BridgeConfig } from "./types";
 
 const DEFAULT_MCP_PORT = 3000;
 const DEFAULT_POKE_API_BASE_URL = "https://poke.com/api/v1";
 const DEFAULT_MCP_HOST = "127.0.0.1";
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 40;
+const DEFAULT_BRIDGE_MODE: BridgeMode = "private";
 const DOTENV_PATH = join(process.cwd(), ".env");
 
 function loadDotEnv(path = DOTENV_PATH): void {
@@ -35,6 +37,11 @@ function readNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readBridgeMode(value: string | undefined): BridgeMode {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "public" ? "public" : DEFAULT_BRIDGE_MODE;
+}
+
 export function loadConfig(): BridgeConfig {
   loadDotEnv();
   const discordToken = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN ?? "";
@@ -56,6 +63,7 @@ export function loadConfig(): BridgeConfig {
     statePath,
     autoTunnel: readBoolean(process.env.POKE_AUTO_TUNNEL, false),
     contextMessageCount: readNumber(process.env.POKE_CONTEXT_MESSAGES, DEFAULT_CONTEXT_MESSAGE_COUNT),
-    edgeSecret
+    edgeSecret,
+    bridgeMode: readBridgeMode(process.env.POKE_BRIDGE_MODE)
   };
 }

@@ -101,7 +101,7 @@ function resolveSentMessageTarget(targets: Map<string, DiscordSentMessageRecord>
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const state = await loadState(config.statePath);
+  const state = await loadState(config.statePath, config.bridgeMode);
   const pendingTargets = new Map<string, DiscordReplyTarget>();
   const sentMessages = new Map<string, DiscordSentMessageRecord>();
   let discordClient: Awaited<ReturnType<typeof startDiscordBot>> | null = null;
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
     await saveQueue;
   };
 
-  log("Cloudflare Worker mode is required for Poke to call back into Discord.");
+  log(`Starting in ${config.bridgeMode} mode.`);
 
   const mcp = await startMcpServer({
     host: config.mcpHost,
@@ -122,7 +122,7 @@ async function main(): Promise<void> {
     proxySecret: config.edgeSecret,
     onSendDiscordMessage: async (content, meta) => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const channelId = resolveReplyTarget(pendingTargets, meta, state.dmChannelId);
+      const channelId = resolveReplyTarget(pendingTargets, meta, state.private.dmChannelId);
       const messageIds = await sendDiscordMessage(discordClient, channelId, content, {
         replyToMessageId: meta?.replyToMessageId,
         attachments: meta?.attachments,
@@ -133,23 +133,24 @@ async function main(): Promise<void> {
     },
     onEditDiscordMessage: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.dmChannelId);
+      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.private.dmChannelId);
       await editDiscordMessage(discordClient, channelId, messageId, meta.content, meta.embeds);
     },
     onDeleteDiscordMessage: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.dmChannelId);
+      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.private.dmChannelId);
       await deleteDiscordMessage(discordClient, channelId, messageId);
     },
     onReactDiscordMessage: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const channelId = resolveReplyTarget(pendingTargets, meta, state.dmChannelId);
+      const channelId = resolveReplyTarget(pendingTargets, meta, state.private.dmChannelId);
       if (!meta.messageId) throw new Error("Discord message id is required.");
       await sendDiscordReaction(discordClient, channelId, meta.messageId, meta.emoji);
     }
   });
 
   log(`MCP server listening on http://${config.mcpHost}:${mcp.port}`);
+  log(`Bridge mode: ${config.bridgeMode}`);
   tunnelProcess = await startTunnel(mcp.port, config.autoTunnel && config.edgeSecret == null);
 
   discordClient = await startDiscordBot(config, state, async next => persistState(next), async request => {
