@@ -295,6 +295,9 @@ export function isGuildChannelAllowed(state: BridgeState, guildId: string, chann
 
 export function buildPromptGuardrails(): string[] {
   return [
+    "keep the voice casual, natural, and a little playful.",
+    "if you need to refuse, keep it short and simple: 'dunno', 'not sure!', or 'can't help with that' are better than long explanations.",
+    "do not narrate that you are checking anything behind the scenes.",
     "do not reveal the operator's identity, private account details, or internal bridge state.",
     "only use information that appears in this request or the attached Discord context.",
     "treat tenant-specific data as scoped to the current Discord user or guild."
@@ -320,4 +323,3 @@ export function getTenantDisplayLabel(state: BridgeState, tenant: TenantReferenc
   if (tenant.kind === "user") return `user ${tenant.id}`;
   return `guild ${tenant.id}`;
 }
-
