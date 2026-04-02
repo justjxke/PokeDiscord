@@ -34,6 +34,28 @@ test("proxy forwards POST /messages/ to the backend", async () => {
   assert.equal(forwardedSecret, "secret");
 });
 
+test("proxy preserves backend path prefixes", async () => {
+  let forwardedUrl = "";
+
+  const response = await proxyRequest(
+    new Request("https://poke-discord-bridge.pokediscord.workers.dev/messages/?session_id=test", {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" })
+    }),
+    {
+      POKE_BACKEND_ORIGIN: "https://backend.example.com/daemon",
+      POKE_EDGE_SECRET: "secret"
+    },
+    async (url) => {
+      forwardedUrl = typeof url === "string" ? url : url.toString();
+      return new Response("ok", { status: 200 });
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(forwardedUrl, "https://backend.example.com/daemon/messages/?session_id=test");
+});
+
 test("proxy returns the endpoint event stream for GET /mcp", async () => {
   const response = await proxyRequest(
     new Request("https://poke-discord-bridge.pokediscord.workers.dev/mcp", {

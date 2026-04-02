@@ -20,7 +20,9 @@ function plainResponse(message: string, status: number): Response {
 
 function buildBackendUrl(requestUrl: URL, backendOrigin: string): URL {
   const url = new URL(backendOrigin);
-  url.pathname = requestUrl.pathname;
+  const basePath = url.pathname.replace(/\/+$/, "");
+  const requestPath = requestUrl.pathname.replace(/^\/+/, "");
+  url.pathname = `${basePath}/${requestPath}`.replace(/\/{2,}/g, "/");
   url.search = requestUrl.search;
   return url;
 }
