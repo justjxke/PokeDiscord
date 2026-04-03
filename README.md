@@ -12,14 +12,12 @@ Discord bridge for Poke, hosted 24/7. No self-hosting required:
 
 ## Quick Start
 
-1. Install the bot with [this invite link](https://discord.com/oauth2/authorize?client_id=1488275565214433481).
-2. Use the MCP server URL: [https://mcs.creations.works/jake-mcp/mcp](https://mcs.creations.works/jake-mcp/mcp).
+1. Install the Poke [Recipe](https://poke.com/r/rM-oP0F4uAV)
+2. Install the bot with [this invite link](https://discord.com/oauth2/authorize?client_id=1488275565214433481).
 3. For your own private use, open a DM with the bot and run `/poke setup`.
 4. For a server, ask a server admin or owner to run `/poke setup`.
 5. Use `/poke status` or `!status` to confirm the link.
 6. Send messages normally after setup.
-
-Note: `https://mcs.creations.works/jake-mcp/` is the mounted base path. The actual MCP entrypoint is `/mcp`.
 
 ## Setup
 
@@ -56,5 +54,5 @@ For a server:
 
 ## Notes
 
-- Users can paste their Poke API key in DMs to link their own account; the bot deletes the paste after capture.
-- The bot refuses operator identity and internal bridge state requests.
+- Poke will refuse to answer personal questions about who owns the API key or who is initially linked to the bot when used in guilds.
+- The "Poke is typing..." is emulated and not actually Poke typing/thinking, until Interaction adds a way to see when Poke is working, this is emulated.
