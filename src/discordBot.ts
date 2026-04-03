@@ -338,6 +338,11 @@ export function buildSetupLinkedMessage(state: BridgeState, tenant: TenantRefere
   return `${status} Use /poke status if you want the full view, or /poke reset to relink.`;
 }
 
+export function isTenantLinked(state: BridgeState, tenant: TenantReference): boolean {
+  const tenantSecret = getTenantSecretState(state, tenant);
+  return Boolean(tenantSecret?.encryptedPokeApiKey);
+}
+
 function setTenantSecretState(state: BridgeState, tenant: TenantReference, encryptedPokeApiKey: ReturnType<typeof encryptTenantSecret>, discordUserId: string, dmChannelId: string): BridgeState {
   if (tenant.kind === "owner") {
     return setOwnerLink(state, discordUserId, dmChannelId, encryptedPokeApiKey);
@@ -600,10 +605,9 @@ export async function startDiscordBot(
 
       const subcommand = interaction.options.getSubcommand();
       const tenant = interaction.inGuild() ? getTenantForGuild(interaction.guildId) : getTenantForDm(config, interaction.user.id);
-      const tenantSecret = getTenantSecretState(state, tenant);
 
       if (subcommand === "setup") {
-        if (tenantSecret?.encryptedPokeApiKey) {
+        if (isTenantLinked(state, tenant)) {
           await respond(interaction, buildSetupLinkedMessage(state, tenant, config));
           return;
         }
@@ -659,6 +663,7 @@ export async function startDiscordBot(
       }
 
       if (subcommand !== "send") return;
+      const tenantSecret = getTenantSecretState(state, tenant);
 
       if (interaction.inGuild() && !isGuildChannelAllowed(state, interaction.guildId, interaction.channelId)) {
         await respond(interaction, "This channel is not enabled for Poke yet.");
