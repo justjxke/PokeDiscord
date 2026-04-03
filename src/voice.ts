@@ -9,13 +9,13 @@ import type {
   DiscordVoiceTrackSummary,
   DiscordVoiceUserSnapshot
 } from "./types";
+import { resolvePlayableTrackUrl, type PlayDlLike } from "./musicResolver";
 
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const VOICE_READY_TIMEOUT_MS = 30_000;
 
 type VoiceApi = typeof import("@discordjs/voice");
 type PlayDlApi = typeof import("play-dl");
-
 type VoiceTrack = DiscordVoiceTrackSummary;
 
 interface VoiceSession {
@@ -77,7 +77,7 @@ export interface VoiceManager {
 
 interface VoiceLibraries {
   discordVoice: Pick<VoiceApi, "AudioPlayerStatus" | "NoSubscriberBehavior" | "StreamType" | "VoiceConnectionStatus" | "createAudioPlayer" | "createAudioResource" | "entersState" | "getVoiceConnection" | "joinVoiceChannel">;
-  playDl: Pick<PlayDlApi, "stream_from_info" | "video_basic_info" | "yt_validate">;
+  playDl: Pick<PlayDlApi, "search" | "sp_validate" | "spotify" | "stream_from_info" | "video_basic_info" | "yt_validate">;
 }
 
 let voiceLibrariesPromise: Promise<VoiceLibraries> | null = null;
@@ -156,17 +156,13 @@ function describeUrl(url: string): string {
 
 async function buildTrack(input: Pick<QueueVoiceTrackInput, "requesterDisplayName" | "requesterId" | "url">): Promise<VoiceTrack> {
   const { playDl } = await loadVoiceLibraries();
-  const validation = playDl.yt_validate(input.url);
-  if (validation !== "video") {
-    throw new Error("Only YouTube video URLs are supported.");
-  }
-
-  const info = await playDl.video_basic_info(input.url);
-  const title = info.video_details.title?.trim() || describeUrl(input.url);
+  const resolved = await resolvePlayableTrackUrl(playDl, input.url);
+  const info = await playDl.video_basic_info(resolved.url);
+  const title = info.video_details.title?.trim() || describeUrl(resolved.url);
   return {
     id: randomUUID(),
     title,
-    url: info.video_details.url?.trim() || input.url.trim(),
+    url: info.video_details.url?.trim() || resolved.url.trim(),
     requestedByUserId: input.requesterId,
     requestedByName: input.requesterDisplayName,
     requestedAt: new Date().toISOString()
