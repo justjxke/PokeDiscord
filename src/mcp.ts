@@ -7,7 +7,6 @@ interface StartMcpServerOptions {
   host: string;
   port: number;
   state: BridgeState;
-  proxySecret: string | null;
   onSendDiscordMessage: (content: string, meta?: { channelId?: string; bridgeRequestId?: string; replyToMessageId?: string; attachments?: DiscordOutboundAttachment[]; embeds?: DiscordOutboundEmbed[]; }) => Promise<string[]>;
   onEditDiscordMessage: (meta: { content?: string; embeds?: DiscordOutboundEmbed[]; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
@@ -45,8 +44,7 @@ const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
 const HISTORY_TOOL_NAME = "getChannelHistory";
 const HISTORY_TOOL_DESCRIPTION = "Get recent messages from a Discord channel.";
 const MAX_BODY_BYTES = 128_000;
-const EDGE_SECRET_HEADER = "x-poke-edge-secret";
-const CORS_HEADERS = "Content-Type, Mcp-Session-Id, X-Poke-Edge-Secret";
+const CORS_HEADERS = "Content-Type, Mcp-Session-Id";
 
 function writeJson(res: ServerResponse, statusCode: number, value: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(statusCode, {
@@ -732,15 +730,6 @@ function readHeaderValue(value: string | string[] | undefined): string {
   return value ?? "";
 }
 
-function isAuthorized(req: IncomingMessage, secret: string | null): boolean {
-  if (!secret) return true;
-  return readHeaderValue(req.headers[EDGE_SECRET_HEADER]) === secret;
-}
-
-function writeUnauthorized(res: ServerResponse): void {
-  writeJson(res, 401, { error: true, message: "Missing edge secret." });
-}
-
 export async function startMcpServer(options: StartMcpServerOptions): Promise<{ server: Server; port: number; }> {
   let listeningPort = options.port;
   const origin = `http://${options.host}:${options.port}`;
@@ -769,11 +758,6 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
         installedGuilds: installationCount,
         linkedTenants: (options.state.owner.encryptedPokeApiKey ? 1 : 0) + linkedUsers + installationCount
       });
-      return;
-    }
-
-    if (!isAuthorized(req, options.proxySecret)) {
-      writeUnauthorized(res);
       return;
     }
 

@@ -126,7 +126,6 @@ async function main(): Promise<void> {
     host: config.mcpHost,
     port: config.mcpPort,
     state,
-    proxySecret: config.edgeSecret,
     onSendDiscordMessage: async (content, meta) => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
       const channelId = resolveReplyTarget(pendingTargets, meta);

@@ -35,12 +35,10 @@ export function loadConfig(): BridgeConfig {
   const discordToken = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN ?? "";
   const statePath = process.env.POKE_DISCORD_BRIDGE_STATE_PATH
     ?? join(process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? ".", ".config"), "poke-discord-bridge", "state.json");
-  const edgeSecret = process.env.POKE_EDGE_SECRET?.trim() || "";
-  const stateSecret = process.env.POKE_STATE_SECRET?.trim() || edgeSecret;
+  const stateSecret = process.env.POKE_STATE_SECRET?.trim() || "";
   const ownerDiscordUserId = process.env.POKE_OWNER_DISCORD_USER_ID?.trim() || null;
 
   if (!discordToken.trim()) throw new Error("Missing DISCORD_BOT_TOKEN.");
-  if (!edgeSecret) throw new Error("Missing POKE_EDGE_SECRET.");
   if (!stateSecret) throw new Error("Missing POKE_STATE_SECRET.");
 
   return {
@@ -50,7 +48,6 @@ export function loadConfig(): BridgeConfig {
     mcpPort: readNumber(process.env.POKE_MCP_PORT, DEFAULT_MCP_PORT),
     statePath,
     contextMessageCount: readNumber(process.env.POKE_CONTEXT_MESSAGES, DEFAULT_CONTEXT_MESSAGE_COUNT),
-    edgeSecret,
     stateSecret,
     ownerDiscordUserId,
     bridgeMode: "hybrid"
