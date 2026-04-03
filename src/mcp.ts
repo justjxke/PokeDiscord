@@ -81,8 +81,9 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function getMessageEndpoint(host: string, port: number, sessionId: string): string {
-  return `http://${host}:${port}/messages/?session_id=${sessionId}`;
+function getMessageEndpoint(publicOrigin: string, mountPrefix: string, sessionId: string): string {
+  const prefix = mountPrefix.replace(/\/+$/, "");
+  return `${publicOrigin}${prefix}/messages/?session_id=${sessionId}`;
 }
 
 function splitDiscordContent(content: string): string[] {
@@ -121,6 +122,24 @@ function matchesRoute(path: string, route: string): boolean {
   const normalizedPath = path.replace(/\/+$/, "");
   const normalizedRoute = route.replace(/\/+$/, "");
   return normalizedPath === normalizedRoute || normalizedPath.endsWith(normalizedRoute);
+}
+
+function resolveMountedPrefix(path: string, route: string): string | null {
+  const normalizedPath = path.replace(/\/+$/, "");
+  const normalizedRoute = route.replace(/\/+$/, "");
+  if (normalizedPath === normalizedRoute) {
+    return "";
+  }
+  if (normalizedPath.endsWith(normalizedRoute)) {
+    const prefix = normalizedPath.slice(0, -normalizedRoute.length).replace(/\/+$/, "");
+    return prefix;
+  }
+  return null;
+}
+
+function isMountedRoot(path: string): boolean {
+  const normalizedPath = path.replace(/\/+$/, "");
+  return normalizedPath.length > 1 && normalizedPath.split("/").filter(Boolean).length === 1;
 }
 
 function parseAttachments(value: unknown): DiscordOutboundAttachment[] | undefined {
@@ -740,7 +759,10 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
   let listeningPort = options.port;
   const origin = `http://${options.host}:${options.port}`;
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", origin);
+    const forwardedProto = readHeaderValue(req.headers["x-forwarded-proto"]);
+    const hostHeader = readHeaderValue(req.headers.host) || `${options.host}:${options.port}`;
+    const requestOrigin = `${forwardedProto || "http"}://${hostHeader}`;
+    const url = new URL(req.url ?? "/", requestOrigin);
     const path = url.pathname;
 
     if (req.method === "OPTIONS") {
@@ -767,9 +789,14 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       return;
     }
 
-    if (req.method === "GET" && (matchesRoute(path, "/mcp") || matchesRoute(path, "/sse"))) {
+    const mountedPrefix =
+      resolveMountedPrefix(path, "/mcp")
+      ?? resolveMountedPrefix(path, "/sse")
+      ?? (isMountedRoot(path) ? path.replace(/\/+$/, "") : null);
+
+    if (req.method === "GET" && (matchesRoute(path, "/mcp") || matchesRoute(path, "/sse") || isMountedRoot(path))) {
       const sessionId = randomUUID();
-      const endpoint = getMessageEndpoint(options.host, listeningPort, sessionId);
+      const endpoint = getMessageEndpoint(url.origin, mountedPrefix ?? "", sessionId);
 
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
