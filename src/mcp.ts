@@ -5,7 +5,7 @@ import type { BridgeState, DiscordChannelHistoryMessage, DiscordOutboundAttachme
 import type { VoiceOperationResult } from "./voice";
 
 type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear";
-type QueueVoiceTrackRequest = { bridgeRequestId: string; url: string; position: "front" | "back"; };
+type QueueVoiceTrackRequest = { bridgeRequestId: string; url?: string; artist?: string; query?: string; position: "front" | "back"; };
 type ControlVoicePlaybackRequest = { bridgeRequestId: string; action: VoiceControlAction; index?: number; };
 
 interface StartMcpServerOptions {
@@ -51,7 +51,7 @@ const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
 const HISTORY_TOOL_NAME = "getChannelHistory";
 const HISTORY_TOOL_DESCRIPTION = "Get recent messages from a Discord channel.";
 const QUEUE_VOICE_TOOL_NAME = "queueVoiceTrack";
-const QUEUE_VOICE_TOOL_DESCRIPTION = "Join the requester's voice channel if needed and queue a playable YouTube or Spotify track for playback.";
+const QUEUE_VOICE_TOOL_DESCRIPTION = "Queue music in the current guild voice session. Use a concrete playable URL with url, or use artist plus optional query for Spotify-first discovery when the user only names an artist or gives a vague music request. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found.";
 const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
 const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session.";
 const MAX_BODY_BYTES = 128_000;
@@ -377,12 +377,14 @@ async function handleQueueVoiceTrackToolCall(args: Record<string, unknown>, onQu
   }
 
   const url = readString(args.url);
-  if (!url) {
-    throw new Error("url is required");
+  const artist = readString(args.artist);
+  const query = readString(args.query);
+  if (!url && !artist) {
+    throw new Error("url or artist is required");
   }
 
   const position = args.position === "front" ? "front" : "back";
-  const result = await onQueueVoiceTrack({ bridgeRequestId, url, position });
+  const result = await onQueueVoiceTrack({ bridgeRequestId, ...(url ? { url } : {}), ...(artist ? { artist } : {}), ...(query ? { query } : {}), position });
   return result;
 }
 
@@ -764,7 +766,15 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                 },
                 url: {
                   type: "string",
-                  description: "Concrete YouTube video URL to queue."
+                  description: "Concrete playable YouTube or Spotify track URL to queue."
+                },
+                artist: {
+                  type: "string",
+                  description: "Artist name for Spotify-first discovery when the user only names an artist or gives a vague music request."
+                },
+                query: {
+                  type: "string",
+                  description: "Optional user request text to guide Spotify discovery."
                 },
                 position: {
                   type: "string",
@@ -773,7 +783,11 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                   description: "Queue position for the track."
                 }
               },
-              required: ["bridgeRequestId", "url"]
+              required: ["bridgeRequestId"],
+              anyOf: [
+                { required: ["url"] },
+                { required: ["artist"] }
+              ]
             }
           },
           {

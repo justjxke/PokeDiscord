@@ -6,7 +6,7 @@ const GUILD_PREFACE = [
   "You're chatting in a public server.",
   "Keep the tone natural and helpful, but avoid personal identity, account ownership, age, location, school, work, or private linkage details.",
   "If a request heads that way, steer back to something useful and general.",
-  "If the user asks for music or voice playback, prefer Spotify first for discovery, use the voice context, and pass the bridge a playable YouTube or Spotify track URL. If you cannot find a playable version, ask for a direct link instead of guessing."
+  "If the user asks for music or voice playback, use Spotify-first discovery when they only name an artist or give a vague request, and pass queueVoiceTrack an artist plus optional query. If you already have a concrete playable link, pass url instead. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found."
 ].join(" ");
 
 const DM_PREFACE = [
@@ -89,7 +89,7 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       "When you want to edit a message the bridge already sent, call editDiscordMessage with the message id and new content or embeds.",
       "When you want to delete a message the bridge already sent, call deleteDiscordMessage with the message id.",
       "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id.",
-      "When you want to join or control voice playback, use queueVoiceTrack for a playable YouTube or Spotify track URL, or controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, and clear."
+      "When you want to join or control voice playback, use queueVoiceTrack for either a concrete playable url or an artist-bound music request with artist and optional query. Use controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, and clear."
     );
   } else {
     lines.push("", "Use the same direct style, but keep responses grounded and safe.");

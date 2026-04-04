@@ -12,6 +12,7 @@ import type {
   DiscordVoiceUserSnapshot
 } from "./types";
 import { resolvePlayableTrackUrl, type PlayDlLike } from "./musicResolver";
+import { normalizeMusicKey, rankArtistBoundTracks, type MusicSelectionCandidate } from "./musicSelection";
 
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const VOICE_READY_TIMEOUT_MS = 30_000;
@@ -42,7 +43,9 @@ export interface QueueVoiceTrackInput {
   requesterVoiceChannelId: string;
   requesterVoiceChannelName: string | null;
   textChannelId: string;
-  url: string;
+  url?: string;
+  artist?: string;
+  query?: string;
   position?: "front" | "back";
 }
 
@@ -132,18 +135,82 @@ function describeUrl(url: string): string {
   }
 }
 
-async function buildTrack(input: Pick<QueueVoiceTrackInput, "requesterDisplayName" | "requesterId" | "url">): Promise<VoiceTrack> {
+async function buildTrack(input: Pick<QueueVoiceTrackInput, "requesterDisplayName" | "requesterId"> & { url: string }): Promise<VoiceTrack> {
+  return buildTrackFromPlayableUrl(input.url, input.requesterId, input.requesterDisplayName);
+}
+
+async function buildTrackFromPlayableUrl(url: string, requesterId: string, requesterDisplayName: string): Promise<VoiceTrack> {
   const { playDl } = voiceLibraries;
-  const resolved = await resolvePlayableTrackUrl(playDl, input.url);
-  const info = await playDl.video_basic_info(resolved.url);
-  const title = info.video_details.title?.trim() || describeUrl(resolved.url);
+  const info = await playDl.video_basic_info(url);
+  const title = info.video_details.title?.trim() || describeUrl(url);
   return {
     id: randomUUID(),
     title,
-    url: info.video_details.url?.trim() || resolved.url.trim(),
-    requestedByUserId: input.requesterId,
-    requestedByName: input.requesterDisplayName,
+    url: info.video_details.url?.trim() || url.trim(),
+    requestedByUserId: requesterId,
+    requestedByName: requesterDisplayName,
     requestedAt: new Date().toISOString()
+  };
+}
+
+type PlayDlSpotifySearchResultLike = {
+  id?: string;
+  name: string;
+  url: string;
+  artists?: { name: string }[];
+};
+
+function buildSpotifySearchQuery(artist: string, query?: string): string {
+  return [artist.trim(), query?.trim()].filter(Boolean).join(" ").trim();
+}
+
+function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
+  return {
+    id: track.id,
+    url: track.url,
+    name: track.name,
+    artists: (track.artists ?? []).map(artist => artist.name).filter((artist): artist is string => artist.trim().length > 0)
+  };
+}
+
+async function queueResolvedTrack(
+  client: Client,
+  sessions: Map<string, VoiceSession>,
+  announce: (channelId: string, content: string) => Promise<void>,
+  action: "queueVoiceTrack",
+  input: Pick<QueueVoiceTrackInput, "bridgeRequestId" | "guildId" | "requesterId" | "requesterDisplayName" | "requesterVoiceChannelId" | "requesterVoiceChannelName" | "textChannelId" | "position">,
+  track: VoiceTrack
+): Promise<VoiceOperationResult> {
+  let session = getGuildSession(sessions, input.guildId);
+  if (!session) {
+    session = await createSession(client, input.guildId, input.requesterVoiceChannelId, input.requesterVoiceChannelName, input.textChannelId, announce);
+  }
+
+  if (session.voiceChannelId !== input.requesterVoiceChannelId) {
+    throw new Error(`Poke is already in <#${session.voiceChannelId}>. Join that channel to queue music.`);
+  }
+
+  session.textChannelId = input.textChannelId;
+  clearIdleTimer(session);
+
+  if (input.position === "front") {
+    session.queue.unshift(track);
+  } else {
+    session.queue.push(track);
+  }
+
+  const { discordVoice } = voiceLibraries;
+  const shouldStart = !session.currentTrack && session.player.state.status === discordVoice.AudioPlayerStatus.Idle;
+  if (shouldStart) {
+    await advanceQueue(client, session, announce);
+  }
+
+  return {
+    ok: true,
+    action,
+    message: shouldStart ? `Joined <#${session.voiceChannelId}> and started ${track.title}.` : `Queued ${track.title}.`,
+    session: queueSnapshot(session),
+    track: summarizeTrack(track)
   };
 }
 
@@ -226,6 +293,30 @@ function ensureGuildVoiceChannel(guild: Guild, requesterVoiceChannelId: string |
 const sessionsRef = {
   current: new Map<string, VoiceSession>()
 };
+const recentArtistTracksRef = {
+  current: new Map<string, Map<string, string[]>>()
+};
+
+const ARTIST_HISTORY_LIMIT = 5;
+
+function getArtistHistory(guildId: string, artist: string): string[] {
+  const guildHistory = recentArtistTracksRef.current.get(guildId);
+  if (!guildHistory) return [];
+  return guildHistory.get(normalizeMusicKey(artist)) ?? [];
+}
+
+function rememberArtistTrack(guildId: string, artist: string, trackKey: string): void {
+  const artistKey = normalizeMusicKey(artist);
+  let guildHistory = recentArtistTracksRef.current.get(guildId);
+  if (!guildHistory) {
+    guildHistory = new Map<string, string[]>();
+    recentArtistTracksRef.current.set(guildId, guildHistory);
+  }
+
+  const existing = guildHistory.get(artistKey) ?? [];
+  const next = [trackKey, ...existing.filter(entry => entry !== trackKey)].slice(0, ARTIST_HISTORY_LIMIT);
+  guildHistory.set(artistKey, next);
+}
 
 async function createSession(client: Client, guildId: string, voiceChannelId: string, voiceChannelName: string | null, textChannelId: string | null, announce: (channelId: string, content: string) => Promise<void>): Promise<VoiceSession> {
   const { discordVoice } = voiceLibraries;
@@ -421,40 +512,68 @@ export function createVoiceManager(client: Client, announce: (channelId: string,
     async queueVoiceTrack(input) {
       const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
       const requesterVoice = ensureGuildVoiceChannel(guild, input.requesterVoiceChannelId);
+      if (input.artist?.trim()) {
+        const searchQuery = buildSpotifySearchQuery(input.artist, input.query);
+        const { playDl } = voiceLibraries;
+        const searchResults = await playDl.search(searchQuery, {
+          source: { spotify: "track" },
+          limit: 10
+        });
+
+        const rankedCandidates = rankArtistBoundTracks(
+          searchResults.map(toMusicSelectionCandidate),
+          input.artist,
+          new Set(getArtistHistory(input.guildId, input.artist))
+        );
+
+        if (!rankedCandidates.length) {
+          throw new Error("Couldn't find a playable version. Send a direct link.");
+        }
+
+        let lastError: unknown = null;
+        for (const candidate of rankedCandidates) {
+          try {
+            const resolved = await resolvePlayableTrackUrl(playDl, candidate.url);
+            const track = await buildTrackFromPlayableUrl(resolved.url, input.requesterId, input.requesterDisplayName);
+            rememberArtistTrack(input.guildId, input.artist, candidate.url);
+            return queueResolvedTrack(client, sessions, announce, "queueVoiceTrack", {
+              bridgeRequestId: input.bridgeRequestId,
+              guildId: input.guildId,
+              requesterId: input.requesterId,
+              requesterDisplayName: input.requesterDisplayName,
+              requesterVoiceChannelId: requesterVoice.id,
+              requesterVoiceChannelName: requesterVoice.name,
+              textChannelId: input.textChannelId,
+              position: input.position
+            }, track);
+          } catch (error) {
+            lastError = error;
+          }
+        }
+
+        console.error(`[poke-discord-bridge] No playable track found for artist "${input.artist}" in guild ${input.guildId}:`, lastError);
+        throw new Error("Couldn't find a playable version. Send a direct link.");
+      }
+
+      if (!input.url?.trim()) {
+        throw new Error("url is required");
+      }
+
       const track = await buildTrack({
         requesterId: input.requesterId,
         requesterDisplayName: input.requesterDisplayName,
         url: input.url
       });
-
-      const session = getGuildSession(sessions, input.guildId) ?? await createSession(client, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, announce);
-
-      if (session.voiceChannelId !== requesterVoice.id) {
-        throw new Error(`Poke is already in <#${session.voiceChannelId}>. Join that channel to queue music.`);
-      }
-
-      session.textChannelId = input.textChannelId;
-      clearIdleTimer(session);
-
-      if (input.position === "front") {
-        session.queue.unshift(track);
-      } else {
-        session.queue.push(track);
-      }
-
-      const { discordVoice } = voiceLibraries;
-      const shouldStart = !session.currentTrack && session.player.state.status === discordVoice.AudioPlayerStatus.Idle;
-      if (shouldStart) {
-        await advanceQueue(client, session, announce);
-      }
-
-      return {
-        ok: true,
-        action: "queueVoiceTrack",
-        message: shouldStart ? `Joined <#${session.voiceChannelId}> and started ${track.title}.` : `Queued ${track.title}.`,
-        session: queueSnapshot(session),
-        track: summarizeTrack(track)
-      };
+      return queueResolvedTrack(client, sessions, announce, "queueVoiceTrack", {
+        bridgeRequestId: input.bridgeRequestId,
+        guildId: input.guildId,
+        requesterId: input.requesterId,
+        requesterDisplayName: input.requesterDisplayName,
+        requesterVoiceChannelId: requesterVoice.id,
+        requesterVoiceChannelName: requesterVoice.name,
+        textChannelId: input.textChannelId,
+        position: input.position
+      }, track);
     },
 
     async controlVoicePlayback(input) {

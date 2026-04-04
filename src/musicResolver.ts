@@ -8,13 +8,16 @@ type PlayDlSpotifyTrackLike = {
 type PlayDlSearchResultLike = {
   url?: string;
   title?: string;
+  name?: string;
+  id?: string;
+  artists?: { name: string }[];
 };
 
 export type PlayDlLike = {
   yt_validate(url: string): "playlist" | "video" | "search" | false;
   sp_validate(url: string): "track" | "playlist" | "album" | "search" | false;
   spotify(url: string): Promise<PlayDlSpotifyTrackLike>;
-  search(query: string, options: { source: { youtube: "video" }; limit?: number }): Promise<PlayDlSearchResultLike[]>;
+  search(query: string, options: { source: { youtube: "video" } | { spotify: "track" }; limit?: number }): Promise<PlayDlSearchResultLike[]>;
 };
 
 export interface ResolvedPlayableUrl {

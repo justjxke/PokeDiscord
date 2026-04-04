@@ -205,7 +205,9 @@ async function main(): Promise<void> {
         requesterVoiceChannelId: voiceContext.requester.voiceChannel.id,
         requesterVoiceChannelName: voiceContext.requester.voiceChannel.name,
         textChannelId: request.replyTarget.channelId,
-        url: meta.url,
+        ...(meta.url ? { url: meta.url } : {}),
+        ...(meta.artist ? { artist: meta.artist } : {}),
+        ...(meta.query ? { query: meta.query } : {}),
         position: meta.position
       });
     },
