@@ -6,6 +6,7 @@ import { createConnection } from "node:net";
 
 const LAVALINK_PORT = 2334;
 const LAVALINK_HOST = "127.0.0.1";
+const YOUTUBE_PLUGIN_VERSION = "1.18.0";
 const JAVA_DIR = "/data/jre";
 const JAVA_BIN = `${JAVA_DIR}/bin/java`;
 const LAVALINK_JAR = "/data/Lavalink.jar";
@@ -63,7 +64,12 @@ function escapeYamlString(value: string): string {
 async function ensureLavalinkConfig(password: string): Promise<void> {
   if (await exists(LAVALINK_CONFIG)) {
     const current = await readFile(LAVALINK_CONFIG, "utf8");
-    if (current.includes(`port: ${LAVALINK_PORT}`) && current.includes(`password: "${escapeYamlString(password)}"`)) {
+    if (
+      current.includes(`port: ${LAVALINK_PORT}`) &&
+      current.includes(`password: "${escapeYamlString(password)}"`) &&
+      current.includes(`dependency: "dev.lavalink.youtube:youtube-plugin:${YOUTUBE_PLUGIN_VERSION}"`) &&
+      current.includes("youtube: false")
+    ) {
       return;
     }
   }
@@ -75,9 +81,25 @@ async function ensureLavalinkConfig(password: string): Promise<void> {
       "server:",
       `  port: ${LAVALINK_PORT}`,
       "  address: 0.0.0.0",
+      "  sources:",
+      "    youtube: false",
       "lavalink:",
       "  server:",
       `    password: "${escapeYamlString(password)}"`,
+      "  plugins:",
+      `    - dependency: "dev.lavalink.youtube:youtube-plugin:${YOUTUBE_PLUGIN_VERSION}"`,
+      "      snapshot: false",
+      "plugins:",
+      "  youtube:",
+      "    enabled: true",
+      "    allowSearch: true",
+      "    allowDirectVideoIds: true",
+      "    allowDirectPlaylistIds: true",
+      "    clients:",
+      "      - MUSIC",
+      "      - ANDROID_VR",
+      "      - WEB",
+      "      - WEBEMBEDDED",
       ""
     ].join("\n")
   );
