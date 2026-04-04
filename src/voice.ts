@@ -4,6 +4,7 @@ import type { Client, Guild } from "discord.js";
 import * as playDl from "play-dl";
 
 import { LavalinkManager, type LavalinkPlayer, type LavalinkSearchResponse, type LavalinkTrack } from "./lavalinkClient";
+import { searchSpotifyTracks } from "./spotifySearch";
 import type {
   BridgeConfig,
   DiscordVoiceChannelSnapshot,
@@ -16,7 +17,6 @@ import { resolveLavalinkTrackIdentifier, type PlayDlLike } from "./lavalinkResol
 import { normalizeMusicKey, rankArtistBoundTracks, type MusicSelectionCandidate } from "./musicSelection";
 
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
-const SPOTIFY_AUTH_ERROR_MESSAGE = "Spotify Data is missing";
 const LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS = 15;
 const LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS = 60;
 
@@ -342,30 +342,6 @@ async function ensureSpotifyAuthConfigured(): Promise<void> {
   await spotifyTokenSetup;
 }
 
-async function ensureSpotifySearchReady(): Promise<void> {
-  await ensureSpotifyAuthConfigured();
-
-  const config = readSpotifyAuthConfig();
-  if (!config) {
-    return;
-  }
-
-  const refreshed = await playDl.refreshToken();
-  if (!refreshed) {
-    throw new Error("Spotify token refresh failed. Re-run authorization on the VPS and restart.");
-  }
-}
-
-export function isSpotifySearchResponseError(message: string): boolean {
-  return [
-    SPOTIFY_AUTH_ERROR_MESSAGE,
-    "tracks.items",
-    "Got 401 from the request",
-    "Got 403 from the request",
-    "Response Error :"
-  ].some(fragment => message.includes(fragment));
-}
-
 function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
   return {
     id: track.id,
@@ -638,21 +614,13 @@ async function resolveArtistTrack(
   requesterVoice: { id: string; name: string | null; }
 ): Promise<VoiceOperationResult> {
   const searchQuery = buildSpotifySearchQuery(input.artist ?? "", input.query);
-  await ensureSpotifySearchReady();
-
-  let searchResults: PlayDlSpotifySearchResultLike[];
-  try {
-    searchResults = await playDl.search(searchQuery, {
-      source: { spotify: "track" },
-      limit: 10
-    }) as PlayDlSpotifySearchResultLike[];
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (isSpotifySearchResponseError(message)) {
-      throw new Error("Spotify search failed on this VPS. Refresh the Spotify auth token and restart, then try again. Send a direct link if you want to play right now.");
-    }
-    throw error;
+  await ensureSpotifyAuthConfigured();
+  const spotifyConfig = readSpotifyAuthConfig();
+  if (!spotifyConfig) {
+    throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or send a direct link.");
   }
+
+  const searchResults = await searchSpotifyTracks(searchQuery, spotifyConfig, 10);
 
   const rankedCandidates = rankArtistBoundTracks(
     searchResults.map(toMusicSelectionCandidate),
