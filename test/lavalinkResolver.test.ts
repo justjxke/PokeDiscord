@@ -3,7 +3,30 @@ import { describe, expect, test } from "bun:test";
 import { resolveLavalinkTrackIdentifier } from "../src/lavalinkResolver";
 
 describe("resolveLavalinkTrackIdentifier", () => {
-  test("resolves spotify tracks to a direct youtube watch url", async () => {
+  test("resolves direct youtube video urls to a playable stream url", async () => {
+    const playDl = {
+      yt_validate: () => "video" as const,
+      sp_validate: () => false,
+      video_info: async () => ({
+        format: [
+          {
+            url: "https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18",
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            audioChannels: 2,
+            bitrate: 477506,
+            qualityLabel: "360p"
+          }
+        ]
+      }),
+      decipher_info: async <T>(data: T) => data
+    };
+
+    await expect(resolveLavalinkTrackIdentifier(playDl as never, "https://www.youtube.com/watch?v=OPf0YbXqDm0")).resolves.toBe(
+      "https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18"
+    );
+  });
+
+  test("resolves spotify tracks to a direct playable stream url", async () => {
     const playDl = {
       yt_validate: () => false,
       sp_validate: () => "track" as const,
@@ -19,15 +42,27 @@ describe("resolveLavalinkTrackIdentifier", () => {
           title: "Mark Ronson - Uptown Funk ft. Bruno Mars (Official Video)",
           channel: { name: "Mark Ronson" }
         }
-      ]
+      ],
+      video_info: async () => ({
+        format: [
+          {
+            url: "https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18",
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            audioChannels: 2,
+            bitrate: 477506,
+            qualityLabel: "360p"
+          }
+        ]
+      }),
+      decipher_info: async <T>(data: T) => data
     };
 
     await expect(resolveLavalinkTrackIdentifier(playDl as never, "https://open.spotify.com/track/spotify-track-id")).resolves.toBe(
-      "https://www.youtube.com/watch?v=OPf0YbXqDm0"
+      "https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18"
     );
   });
 
-  test("prefers the youtube result that matches the spotify track title", async () => {
+  test("prefers the youtube result that matches the spotify track title and resolves it to a playable stream url", async () => {
     const playDl = {
       yt_validate: () => false,
       sp_validate: () => "track" as const,
@@ -48,11 +83,23 @@ describe("resolveLavalinkTrackIdentifier", () => {
           title: "Mark Ronson - Uptown Funk ft. Bruno Mars (Official Video)",
           channel: { name: "Mark Ronson" }
         }
-      ]
+      ],
+      video_info: async (url: string) => ({
+        format: [
+          {
+            url: `${url}&direct=1`,
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            audioChannels: 2,
+            bitrate: 477506,
+            qualityLabel: "360p"
+          }
+        ]
+      }),
+      decipher_info: async <T>(data: T) => data
     };
 
     await expect(resolveLavalinkTrackIdentifier(playDl as never, "https://open.spotify.com/track/spotify-track-id")).resolves.toBe(
-      "https://www.youtube.com/watch?v=OPf0YbXqDm0"
+      "https://www.youtube.com/watch?v=OPf0YbXqDm0&direct=1"
     );
   });
 });
