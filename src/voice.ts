@@ -1,26 +1,32 @@
 import { randomUUID } from "node:crypto";
 
-import * as discordVoice from "@discordjs/voice";
 import type { Client, Guild } from "discord.js";
+import { Connectors, LoadType, Shoukaku, type NodeOption, type Player, type Track, type LavalinkResponse } from "shoukaku";
 import * as playDl from "play-dl";
 
 import type {
+  BridgeConfig,
   DiscordVoiceChannelSnapshot,
   DiscordVoiceContext,
   DiscordVoiceSessionSnapshot,
   DiscordVoiceTrackSummary,
   DiscordVoiceUserSnapshot
 } from "./types";
-import { resolvePlayableTrackUrl, type PlayDlLike } from "./musicResolver";
+import { resolveLavalinkTrackIdentifier, type PlayDlLike } from "./lavalinkResolver";
 import { normalizeMusicKey, rankArtistBoundTracks, type MusicSelectionCandidate } from "./musicSelection";
 
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
-const VOICE_READY_TIMEOUT_MS = 30_000;
 const SPOTIFY_AUTH_ERROR_MESSAGE = "Spotify Data is missing";
+const LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS = 15;
+const LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS = 60;
 
 let spotifyTokenSetup: Promise<void> | null = null;
+let lavalinkManager: Shoukaku | null = null;
 
-type VoiceTrack = DiscordVoiceTrackSummary;
+interface VoiceTrack extends DiscordVoiceTrackSummary {
+  encoded: string;
+  sourceUrl: string;
+}
 
 interface VoiceSession {
   guildId: string;
@@ -31,10 +37,8 @@ interface VoiceSession {
   currentTrack: VoiceTrack | null;
   idleLeaveAt: number | null;
   idleLeaveTimer: NodeJS.Timeout | null;
-  player: any;
-  connection: any;
+  player: Player;
   destroyed: boolean;
-  playNonce: number;
 }
 
 export interface QueueVoiceTrackInput {
@@ -81,18 +85,27 @@ export interface VoiceManager {
   getSessionSnapshot(guildId: string): DiscordVoiceSessionSnapshot | null;
 }
 
-interface VoiceLibraries {
-  discordVoice: Pick<typeof discordVoice, "AudioPlayerStatus" | "NoSubscriberBehavior" | "StreamType" | "VoiceConnectionStatus" | "createAudioPlayer" | "createAudioResource" | "entersState" | "getVoiceConnection" | "joinVoiceChannel">;
-  playDl: Pick<typeof playDl, "search" | "sp_validate" | "spotify" | "stream_from_info" | "video_basic_info" | "yt_validate">;
-}
-
-const voiceLibraries: VoiceLibraries = { discordVoice, playDl };
+type PlayDlSpotifySearchResultLike = {
+  id?: string;
+  name: string;
+  url: string;
+  artists?: { name: string }[];
+};
 
 function canonicalVoiceChannel(channelId: string | null, channelName: string | null): DiscordVoiceChannelSnapshot {
   return {
     id: channelId,
     name: channelName
   };
+}
+
+function describeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return url;
+  }
 }
 
 function summarizeTrack(track: VoiceTrack): DiscordVoiceTrackSummary {
@@ -114,12 +127,18 @@ function summarizeSession(session: VoiceSession): DiscordVoiceSessionSnapshot {
     textChannelId: session.textChannelId,
     currentTrack: session.currentTrack ? summarizeTrack(session.currentTrack) : null,
     queue: session.queue.map(summarizeTrack),
-    paused: session.player.state.status === "paused" || session.player.state.status === "autopaused",
+    paused: session.player.paused,
     idleLeavesAt: session.idleLeaveAt == null ? null : new Date(session.idleLeaveAt).toISOString()
   };
 }
 
-function buildRequesterSnapshot(input: { userId: string; username: string; displayName: string; voiceChannelId: string | null; voiceChannelName: string | null; }): DiscordVoiceUserSnapshot {
+function buildRequesterSnapshot(input: {
+  userId: string;
+  username: string;
+  displayName: string;
+  voiceChannelId: string | null;
+  voiceChannelName: string | null;
+}): DiscordVoiceUserSnapshot {
   return {
     userId: input.userId,
     username: input.username,
@@ -129,39 +148,175 @@ function buildRequesterSnapshot(input: { userId: string; username: string; displ
   };
 }
 
-function describeUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.hostname}${parsed.pathname}`.replace(/\/+$/, "");
-  } catch {
-    return url;
+function readUserVoiceChannel(guild: Guild, userId: string): { id: string; name: string | null; } | null {
+  const voiceState = guild.voiceStates.cache.get(userId);
+  if (!voiceState?.channelId) return null;
+
+  return {
+    id: voiceState.channelId,
+    name: voiceState.channel?.name ?? null
+  };
+}
+
+function requireUserVoiceChannel(guild: Guild, userId: string): { id: string; name: string | null; } {
+  const voiceChannel = readUserVoiceChannel(guild, userId);
+  if (!voiceChannel) {
+    throw new Error("Join a voice channel first.");
+  }
+
+  return voiceChannel;
+}
+
+function getGuildSession(sessions: Map<string, VoiceSession>, guildId: string): VoiceSession | null {
+  const session = sessions.get(guildId);
+  if (!session || session.destroyed) return null;
+  return session;
+}
+
+function clearIdleTimer(session: VoiceSession): void {
+  if (session.idleLeaveAt != null) {
+    session.idleLeaveAt = null;
+  }
+
+  if (session.idleLeaveTimer != null) {
+    clearTimeout(session.idleLeaveTimer);
+    session.idleLeaveTimer = null;
   }
 }
 
-async function buildTrack(input: Pick<QueueVoiceTrackInput, "requesterDisplayName" | "requesterId"> & { url: string }): Promise<VoiceTrack> {
-  return buildTrackFromPlayableUrl(input.url, input.requesterId, input.requesterDisplayName);
+function scheduleIdleLeave(
+  sessions: Map<string, VoiceSession>,
+  session: VoiceSession,
+  announce: (channelId: string, content: string) => Promise<void>
+): void {
+  if (session.destroyed || session.idleLeaveAt != null) return;
+
+  session.idleLeaveAt = Date.now() + IDLE_LEAVE_DELAY_MS;
+  const leaveAt = session.idleLeaveAt;
+
+  if (session.textChannelId) {
+    void (async () => {
+      try {
+        await announce(session.textChannelId as string, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
+      } catch {
+        // Best effort only.
+      }
+    })();
+  }
+
+  session.idleLeaveTimer = setTimeout(() => {
+    void (async () => {
+      const current = sessions.get(session.guildId);
+      if (!current || current.destroyed || current.idleLeaveAt !== leaveAt || current.queue.length || current.currentTrack) {
+        return;
+      }
+      await destroySession(sessions, session.guildId);
+    })();
+  }, IDLE_LEAVE_DELAY_MS);
 }
 
-async function buildTrackFromPlayableUrl(url: string, requesterId: string, requesterDisplayName: string): Promise<VoiceTrack> {
-  const { playDl } = voiceLibraries;
-  const info = await playDl.video_basic_info(url);
-  const title = info.video_details.title?.trim() || describeUrl(url);
+function buildLavalinkNodeOption(config: BridgeConfig): NodeOption {
+  const parsed = config.lavalinkUrl.includes("://")
+    ? new URL(config.lavalinkUrl)
+    : new URL(`http://${config.lavalinkUrl}`);
+
+  return {
+    name: config.lavalinkName,
+    url: `${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`,
+    auth: config.lavalinkPassword,
+    secure: config.lavalinkSecure || parsed.protocol === "https:"
+  };
+}
+
+function getLavalinkManager(client: Client, config: BridgeConfig): Shoukaku {
+  if (!lavalinkManager) {
+    lavalinkManager = new Shoukaku(
+      new Connectors.DiscordJS(client),
+      [buildLavalinkNodeOption(config)],
+      {
+        resume: false,
+        reconnectTries: 3,
+        reconnectInterval: 5,
+        restTimeout: LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS,
+        moveOnDisconnect: true,
+        voiceConnectionTimeout: LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS
+      }
+    );
+
+    lavalinkManager.on("error", error => {
+      console.error("[poke-discord-bridge] Lavalink manager error:", error);
+    });
+  }
+
+  return lavalinkManager;
+}
+
+function getIdealNode(): ReturnType<Shoukaku["getIdealNode"]> {
+  return lavalinkManager?.getIdealNode();
+}
+
+function selectLoadResultTrack(result: LavalinkResponse): Track | null {
+  switch (result.loadType) {
+    case LoadType.TRACK:
+      return result.data;
+    case LoadType.SEARCH:
+      return result.data[0] ?? null;
+    case LoadType.PLAYLIST:
+      return result.data.tracks[0] ?? null;
+    case LoadType.EMPTY:
+    case LoadType.ERROR:
+      return null;
+    default:
+      return null;
+  }
+}
+
+function buildTrackFromResolvedLavalinkTrack(
+  resolved: Track,
+  sourceUrl: string,
+  requesterId: string,
+  requesterDisplayName: string
+): VoiceTrack {
   return {
     id: randomUUID(),
-    title,
-    url: info.video_details.url?.trim() || url.trim(),
+    title: resolved.info.title?.trim() || describeUrl(sourceUrl),
+    url: resolved.info.uri?.trim() || sourceUrl.trim(),
+    encoded: resolved.encoded,
+    sourceUrl,
     requestedByUserId: requesterId,
     requestedByName: requesterDisplayName,
     requestedAt: new Date().toISOString()
   };
 }
 
-type PlayDlSpotifySearchResultLike = {
-  id?: string;
-  name: string;
-  url: string;
-  artists?: { name: string }[];
-};
+async function resolvePlayableTrackForQueue(
+  sourceUrl: string,
+  sourceTitle: string | null,
+  requesterId: string,
+  requesterDisplayName: string
+): Promise<VoiceTrack> {
+  if (!lavalinkManager) {
+    throw new Error("Lavalink is not ready.");
+  }
+
+  const identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl);
+  const node = getIdealNode();
+  if (!node) {
+    throw new Error("Lavalink is not ready.");
+  }
+
+  const result = await node.rest.resolve(identifier);
+  if (!result) {
+    throw new Error("Lavalink is not ready.");
+  }
+
+  const track = selectLoadResultTrack(result);
+  if (!track) {
+    throw new Error("Couldn't find a playable version. Send a direct link.");
+  }
+
+  return buildTrackFromResolvedLavalinkTrack(track, sourceTitle ?? sourceUrl, requesterId, requesterDisplayName);
+}
 
 function buildSpotifySearchQuery(artist: string, query?: string): string {
   return [artist.trim(), query?.trim()].filter(Boolean).join(" ").trim();
@@ -217,20 +372,201 @@ function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicS
   };
 }
 
+async function createSession(
+  client: Client,
+  config: BridgeConfig,
+  guildId: string,
+  voiceChannelId: string,
+  voiceChannelName: string | null,
+  textChannelId: string | null,
+  sessions: Map<string, VoiceSession>,
+  announce: (channelId: string, content: string) => Promise<void>
+): Promise<VoiceSession> {
+  const manager = getLavalinkManager(client, config);
+  await manager.leaveVoiceChannel(guildId).catch(() => undefined);
+
+  const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
+  const player = await manager.joinVoiceChannel({
+    guildId,
+    shardId: typeof guild.shardId === "number" ? guild.shardId : 0,
+    channelId: voiceChannelId,
+    deaf: true
+  });
+
+  const session: VoiceSession = {
+    guildId,
+    voiceChannelId,
+    voiceChannelName,
+    textChannelId,
+    queue: [],
+    currentTrack: null,
+    idleLeaveAt: null,
+    idleLeaveTimer: null,
+    player,
+    destroyed: false
+  };
+
+  sessions.set(guildId, session);
+
+  player.on("end", event => {
+    void handleTrackCompletion(sessions, session, announce, event.reason);
+  });
+
+  player.on("stuck", event => {
+    console.error(`[poke-discord-bridge] Voice track stuck in guild ${guildId}:`, event);
+    void handleTrackFailure(sessions, session, announce, "A track got stuck. Skipping to the next one.");
+  });
+
+  player.on("exception", event => {
+    console.error(`[poke-discord-bridge] Voice track exception in guild ${guildId}:`, event);
+    void handleTrackFailure(sessions, session, announce, "A track failed to play. Skipping to the next one.");
+  });
+
+  player.on("closed", event => {
+    console.error(`[poke-discord-bridge] Voice player closed in guild ${guildId}:`, event);
+    void destroySession(sessions, guildId);
+  });
+
+  return session;
+}
+
+async function destroySession(sessions: Map<string, VoiceSession>, guildId: string): Promise<void> {
+  const session = sessions.get(guildId);
+  if (!session || session.destroyed) return;
+
+  session.destroyed = true;
+  clearIdleTimer(session);
+  session.queue = [];
+  session.currentTrack = null;
+
+  try {
+    await session.player.destroy();
+  } catch {
+    // Ignore teardown failures.
+  }
+
+  sessions.delete(guildId);
+}
+
+async function handleTrackCompletion(
+  sessions: Map<string, VoiceSession>,
+  session: VoiceSession,
+  announce: (channelId: string, content: string) => Promise<void>,
+  reason: string
+): Promise<void> {
+  if (session.destroyed) return;
+
+  const finishedTrack = session.currentTrack;
+  session.currentTrack = null;
+
+  if (finishedTrack == null) {
+    if (!session.queue.length) {
+      scheduleIdleLeave(sessions, session, announce);
+    }
+    return;
+  }
+
+  if (reason === "stopped" || reason === "finished" || reason === "replaced" || reason === "cleanup") {
+    if (session.queue.length) {
+      await advanceQueue(sessions, session, announce);
+      return;
+    }
+    scheduleIdleLeave(sessions, session, announce);
+    return;
+  }
+
+  if (session.queue.length) {
+    await advanceQueue(sessions, session, announce);
+    return;
+  }
+
+  scheduleIdleLeave(sessions, session, announce);
+}
+
+async function handleTrackFailure(
+  sessions: Map<string, VoiceSession>,
+  session: VoiceSession,
+  announce: (channelId: string, content: string) => Promise<void>,
+  message: string
+): Promise<void> {
+  if (session.destroyed) return;
+
+  const failedTrack = session.currentTrack;
+  session.currentTrack = null;
+
+  if (failedTrack && session.textChannelId) {
+    try {
+      await announce(session.textChannelId, `${message} ${failedTrack.title}`);
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  if (session.queue.length) {
+    await advanceQueue(sessions, session, announce);
+    return;
+  }
+
+  scheduleIdleLeave(sessions, session, announce);
+}
+
+async function advanceQueue(
+  sessions: Map<string, VoiceSession>,
+  session: VoiceSession,
+  announce: (channelId: string, content: string) => Promise<void>
+): Promise<void> {
+  if (session.destroyed || session.currentTrack) return;
+
+  const nextTrack = session.queue.shift() ?? null;
+  if (!nextTrack) {
+    scheduleIdleLeave(sessions, session, announce);
+    return;
+  }
+
+  clearIdleTimer(session);
+  session.currentTrack = nextTrack;
+
+  try {
+    await session.player.playTrack({ track: { encoded: nextTrack.encoded } });
+  } catch (error) {
+    console.error(`[poke-discord-bridge] Failed to play track in guild ${session.guildId}:`, error);
+    session.currentTrack = null;
+
+    if (session.textChannelId) {
+      try {
+        await announce(session.textChannelId, `I couldn't play ${nextTrack.title}. Skipping it.`);
+      } catch {
+        // Best effort only.
+      }
+    }
+
+    if (session.queue.length) {
+      await advanceQueue(sessions, session, announce);
+      return;
+    }
+
+    scheduleIdleLeave(sessions, session, announce);
+  }
+}
+
 async function queueResolvedTrack(
   client: Client,
+  config: BridgeConfig,
   sessions: Map<string, VoiceSession>,
   announce: (channelId: string, content: string) => Promise<void>,
   action: "queueVoiceTrack",
   input: Pick<QueueVoiceTrackInput, "bridgeRequestId" | "guildId" | "requesterId" | "requesterDisplayName" | "requesterVoiceChannelId" | "requesterVoiceChannelName" | "textChannelId" | "position">,
   track: VoiceTrack
 ): Promise<VoiceOperationResult> {
+  const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
+  const requesterVoice = requireUserVoiceChannel(guild, input.requesterId);
   let session = getGuildSession(sessions, input.guildId);
+
   if (!session) {
-    session = await createSession(client, input.guildId, input.requesterVoiceChannelId, input.requesterVoiceChannelName, input.textChannelId, announce);
+    session = await createSession(client, config, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, sessions, announce);
   }
 
-  if (session.voiceChannelId !== input.requesterVoiceChannelId) {
+  if (session.voiceChannelId !== requesterVoice.id) {
     throw new Error(`Poke is already in <#${session.voiceChannelId}>. Join that channel to queue music.`);
   }
 
@@ -243,10 +579,9 @@ async function queueResolvedTrack(
     session.queue.push(track);
   }
 
-  const { discordVoice } = voiceLibraries;
-  const shouldStart = !session.currentTrack && session.player.state.status === discordVoice.AudioPlayerStatus.Idle;
+  const shouldStart = session.currentTrack == null;
   if (shouldStart) {
-    await advanceQueue(client, session, announce);
+    await advanceQueue(sessions, session, announce);
   }
 
   return {
@@ -258,90 +593,9 @@ async function queueResolvedTrack(
   };
 }
 
-function buildResourceUrl(track: VoiceTrack): string {
-  return track.url;
+function queueSnapshot(session: VoiceSession): DiscordVoiceSessionSnapshot {
+  return summarizeSession(session);
 }
-
-function readRequesterVoiceChannel(guild: Guild, requesterId: string): { id: string; name: string | null; } | null {
-  const voiceState = guild.voiceStates.cache.get(requesterId);
-  if (!voiceState?.channelId) return null;
-  return {
-    id: voiceState.channelId,
-    name: voiceState.channel?.name ?? null
-  };
-}
-
-function getGuildSession(sessions: Map<string, VoiceSession>, guildId: string): VoiceSession | null {
-  const session = sessions.get(guildId);
-  if (!session || session.destroyed) return null;
-  return session;
-}
-
-function clearIdleTimer(session: VoiceSession): void {
-  if (session.idleLeaveAt != null) {
-    session.idleLeaveAt = null;
-  }
-  if (session.idleLeaveTimer != null) {
-    clearTimeout(session.idleLeaveTimer);
-    session.idleLeaveTimer = null;
-  }
-}
-
-function scheduleIdleLeave(session: VoiceSession, announce: (channelId: string, content: string) => Promise<void>): void {
-  if (session.destroyed) return;
-  if (session.idleLeaveAt != null) return;
-
-  session.idleLeaveAt = Date.now() + IDLE_LEAVE_DELAY_MS;
-  const leaveAt = session.idleLeaveAt;
-
-  const announcementChannelId = session.textChannelId;
-  if (announcementChannelId) {
-    void (async () => {
-      try {
-        await announce(announcementChannelId, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
-      } catch {
-        // Best effort only.
-      }
-    })();
-  }
-
-  session.idleLeaveTimer = setTimeout(() => {
-    void (async () => {
-      const current = session.destroyed ? null : session;
-      if (!current || current.idleLeaveAt !== leaveAt || current.queue.length || current.currentTrack) return;
-
-      const afterAnnouncement = session.destroyed ? null : session;
-      if (!afterAnnouncement || afterAnnouncement.idleLeaveAt !== leaveAt || afterAnnouncement.queue.length || afterAnnouncement.currentTrack) return;
-      destroySession(sessionsRef.current, afterAnnouncement.guildId);
-    })();
-  }, IDLE_LEAVE_DELAY_MS);
-}
-
-function ensureGuildVoiceChannel(guild: Guild, requesterVoiceChannelId: string | null): { id: string; name: string | null; } {
-  if (!requesterVoiceChannelId) {
-    throw new Error("Join a voice channel first.");
-  }
-
-  const state = guild.voiceStates.cache.get(requesterVoiceChannelId);
-  return state?.channelId
-    ? {
-        id: state.channelId,
-        name: state.channel?.name ?? null
-      }
-    : {
-        id: requesterVoiceChannelId,
-        name: null
-      };
-}
-
-const sessionsRef = {
-  current: new Map<string, VoiceSession>()
-};
-const recentArtistTracksRef = {
-  current: new Map<string, Map<string, string[]>>()
-};
-
-const ARTIST_HISTORY_LIMIT = 5;
 
 function getArtistHistory(guildId: string, artist: string): string[] {
   const guildHistory = recentArtistTracksRef.current.get(guildId);
@@ -362,268 +616,251 @@ function rememberArtistTrack(guildId: string, artist: string, trackKey: string):
   guildHistory.set(artistKey, next);
 }
 
-async function createSession(client: Client, guildId: string, voiceChannelId: string, voiceChannelName: string | null, textChannelId: string | null, announce: (channelId: string, content: string) => Promise<void>): Promise<VoiceSession> {
-  const { discordVoice } = voiceLibraries;
-  const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
-  const existingConnection = discordVoice.getVoiceConnection(guildId);
-  if (existingConnection) {
-    existingConnection.destroy();
+const sessionsRef = {
+  current: new Map<string, VoiceSession>()
+};
+
+const recentArtistTracksRef = {
+  current: new Map<string, Map<string, string[]>>()
+};
+
+const ARTIST_HISTORY_LIMIT = 5;
+
+async function resolveArtistTrack(
+  client: Client,
+  config: BridgeConfig,
+  sessions: Map<string, VoiceSession>,
+  announce: (channelId: string, content: string) => Promise<void>,
+  input: QueueVoiceTrackInput,
+  requesterVoice: { id: string; name: string | null; }
+): Promise<VoiceOperationResult> {
+  const searchQuery = buildSpotifySearchQuery(input.artist ?? "", input.query);
+  await ensureSpotifyAuthConfigured();
+
+  let searchResults: PlayDlSpotifySearchResultLike[];
+  try {
+    searchResults = await playDl.search(searchQuery, {
+      source: { spotify: "track" },
+      limit: 10
+    }) as PlayDlSpotifySearchResultLike[];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes(SPOTIFY_AUTH_ERROR_MESSAGE)) {
+      throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or run play-dl authorization on the VPS, then restart. Send a direct link if you want to play right now.");
+    }
+    throw error;
   }
 
-  const player = discordVoice.createAudioPlayer({
-    behaviors: {
-      noSubscriber: discordVoice.NoSubscriberBehavior.Pause
+  const rankedCandidates = rankArtistBoundTracks(
+    searchResults.map(toMusicSelectionCandidate),
+    input.artist ?? "",
+    new Set(getArtistHistory(input.guildId, input.artist ?? ""))
+  );
+
+  if (!rankedCandidates.length) {
+    throw new Error("Couldn't find a playable version. Send a direct link.");
+  }
+
+  let lastError: unknown = null;
+  for (const candidate of rankedCandidates) {
+    try {
+      const track = await resolvePlayableTrackForQueue(candidate.url, candidate.name, input.requesterId, input.requesterDisplayName);
+      rememberArtistTrack(input.guildId, input.artist ?? "", candidate.url);
+      return queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
+        bridgeRequestId: input.bridgeRequestId,
+        guildId: input.guildId,
+        requesterId: input.requesterId,
+        requesterDisplayName: input.requesterDisplayName,
+        requesterVoiceChannelId: requesterVoice.id,
+        requesterVoiceChannelName: requesterVoice.name,
+        textChannelId: input.textChannelId,
+        position: input.position
+      }, track);
+    } catch (error) {
+      lastError = error;
     }
-  });
+  }
 
-  const connection = discordVoice.joinVoiceChannel({
-    channelId: voiceChannelId,
-    guildId,
-    adapterCreator: guild.voiceAdapterCreator,
-    selfDeaf: true
-  });
+  console.error(`[poke-discord-bridge] No playable track found for artist "${input.artist}" in guild ${input.guildId}:`, lastError);
+  throw new Error("Couldn't find a playable version. Send a direct link.");
+}
 
-  const session: VoiceSession = {
-    guildId,
-    voiceChannelId,
-    voiceChannelName,
-    textChannelId,
-    queue: [],
-    currentTrack: null,
-    idleLeaveAt: null,
-    idleLeaveTimer: null,
-    player,
-    connection,
-    destroyed: false,
-    playNonce: 0
+function buildVoiceContext(
+  guild: Guild | null | undefined,
+  requester: { userId: string; username: string; displayName: string; },
+  sessions: Map<string, VoiceSession>
+): DiscordVoiceContext | null {
+  if (!guild) return null;
+
+  const requesterVoice = readUserVoiceChannel(guild, requester.userId);
+  const session = getGuildSession(sessions, guild.id);
+
+  return {
+    requester: buildRequesterSnapshot({
+      userId: requester.userId,
+      username: requester.username,
+      displayName: requester.displayName,
+      voiceChannelId: requesterVoice?.id ?? null,
+      voiceChannelName: requesterVoice?.name ?? null
+    }),
+    bot: session ? queueSnapshot(session) : null
   };
-
-  sessionsRef.current.set(guildId, session);
-  connection.subscribe(player);
-
-  player.on(discordVoice.AudioPlayerStatus.Idle, () => {
-    void advanceQueue(client, session, announce);
-  });
-
-  player.on("error", error => {
-    console.error(`[poke-discord-bridge] Voice player error in guild ${guildId}:`, error);
-    void advanceQueue(client, session, announce);
-  });
-
-  connection.on("stateChange", (_, next) => {
-    if (next.status === discordVoice.VoiceConnectionStatus.Destroyed) {
-      session.destroyed = true;
-      sessionsRef.current.delete(guildId);
-      return;
-    }
-
-    if (next.status === discordVoice.VoiceConnectionStatus.Disconnected) {
-      void (async () => {
-        try {
-          await discordVoice.entersState(connection, discordVoice.VoiceConnectionStatus.Signalling, 5_000);
-        } catch {
-          if (!session.destroyed) {
-            connection.destroy();
-          }
-        }
-      })();
-    }
-  });
-
-  try {
-    await discordVoice.entersState(connection, discordVoice.VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
-  } catch (error) {
-    connection.destroy();
-    sessionsRef.current.delete(guildId);
-    throw new Error(`Failed to join the voice channel: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  return session;
 }
 
-function destroySession(sessions: Map<string, VoiceSession>, guildId: string): void {
-  const session = sessions.get(guildId);
-  if (!session || session.destroyed) return;
-  session.destroyed = true;
-  clearIdleTimer(session);
-  session.queue = [];
-  session.currentTrack = null;
-  try {
-    session.player.stop(true);
-  } catch {
-    // Ignore stop failures during teardown.
-  }
-  try {
-    session.connection?.destroy();
-  } catch {
-    // Ignore teardown failures.
-  }
-  sessions.delete(guildId);
-}
-
-async function advanceQueue(client: Client, session: VoiceSession, announce: (channelId: string, content: string) => Promise<void>): Promise<void> {
-  if (session.destroyed) return;
-  const nextTrack = session.queue.shift() ?? null;
-
-  if (!nextTrack) {
-    session.currentTrack = null;
-    scheduleIdleLeave(session, announce);
-    return;
-  }
-
-  clearIdleTimer(session);
-  session.currentTrack = nextTrack;
-  const nonce = ++session.playNonce;
-
-  try {
-    const { discordVoice, playDl } = voiceLibraries;
-    const info = await playDl.video_basic_info(buildResourceUrl(nextTrack));
-    if (session.destroyed || session.playNonce !== nonce) return;
-
-    const source = await playDl.stream_from_info(info, { discordPlayerCompatibility: true });
-    if (session.destroyed || session.playNonce !== nonce) return;
-
-    const resource = discordVoice.createAudioResource(source.stream, {
-      inputType: source.type as any,
-      metadata: summarizeTrack(nextTrack)
-    });
-
-    session.player.play(resource);
-  } catch (error) {
-    console.error(`[poke-discord-bridge] Failed to play track in guild ${session.guildId}:`, error);
-    if (session.destroyed || session.playNonce !== nonce) return;
-
-    session.currentTrack = null;
-    const announcementChannelId = session.textChannelId;
-    if (announcementChannelId) {
-      try {
-        await announce(announcementChannelId, `I couldn't play ${nextTrack.title}. Skipping it.`);
-      } catch {
-        // Best effort only.
-      }
-    }
-
-    if (session.queue.length) {
-      await advanceQueue(client, session, announce);
-      return;
-    }
-
-    scheduleIdleLeave(session, announce);
-  }
-}
-
-function requireSession(sessions: Map<string, VoiceSession>, guildId: string): VoiceSession {
-  const session = getGuildSession(sessions, guildId);
-  if (!session) {
-    throw new Error("Poke is not in a voice channel in this server.");
-  }
-  return session;
-}
-
-function ensureSameChannel(session: VoiceSession, requesterVoiceChannelId: string | null): void {
-  if (!requesterVoiceChannelId || session.voiceChannelId !== requesterVoiceChannelId) {
+async function ensureSessionVoiceMatch(session: VoiceSession, requesterVoice: { id: string; name: string | null; } | null): Promise<void> {
+  if (!requesterVoice || session.voiceChannelId !== requesterVoice.id) {
     throw new Error(`Poke is in <#${session.voiceChannelId}>. Join that channel to control playback.`);
   }
 }
 
-function queueSnapshot(session: VoiceSession): DiscordVoiceSessionSnapshot {
-  return summarizeSession(session);
+async function controlVoicePlaybackImpl(
+  client: Client,
+  config: BridgeConfig,
+  sessions: Map<string, VoiceSession>,
+  announce: (channelId: string, content: string) => Promise<void>,
+  input: ControlVoicePlaybackInput
+): Promise<VoiceOperationResult> {
+  const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
+  const requesterVoice = input.requesterId ? readUserVoiceChannel(guild, input.requesterId) : null;
+  const existingSession = getGuildSession(sessions, input.guildId);
+
+  if (input.action !== "join" && !existingSession) {
+    throw new Error("Poke is not in a voice channel in this server.");
+  }
+
+  if (input.action !== "join") {
+    await ensureSessionVoiceMatch(existingSession as VoiceSession, requesterVoice);
+  } else if (existingSession && requesterVoice && existingSession.voiceChannelId !== requesterVoice.id) {
+    throw new Error(`Poke is in <#${existingSession.voiceChannelId}>. Join that channel to control playback.`);
+  }
+
+  let session = existingSession;
+  if (input.action === "join") {
+    if (!requesterVoice) {
+      throw new Error("Join a voice channel first.");
+    }
+
+    if (!session) {
+      session = await createSession(client, config, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, sessions, announce);
+    }
+  }
+
+  if (!session) {
+    throw new Error("Poke is not in a voice channel in this server.");
+  }
+
+  session.textChannelId = input.textChannelId;
+
+  switch (input.action) {
+    case "join":
+      return {
+        ok: true,
+        action: "join",
+        message: `Ready in <#${session.voiceChannelId}>.`,
+        session: queueSnapshot(session)
+      };
+    case "pause":
+      if (session.player.paused) {
+        return { ok: true, action: "pause", message: "Already paused.", session: queueSnapshot(session) };
+      }
+      await session.player.setPaused(true);
+      return { ok: true, action: "pause", message: "Paused playback.", session: queueSnapshot(session) };
+    case "resume":
+      if (!session.player.paused) {
+        return { ok: true, action: "resume", message: "Playback is not paused.", session: queueSnapshot(session) };
+      }
+      await session.player.setPaused(false);
+      return { ok: true, action: "resume", message: "Resumed playback.", session: queueSnapshot(session) };
+    case "skip":
+      if (!session.currentTrack) {
+        return { ok: true, action: "skip", message: "Nothing is playing.", session: queueSnapshot(session) };
+      }
+      await session.player.stopTrack();
+      return { ok: true, action: "skip", message: "Skipped the current track.", session: queueSnapshot(session) };
+    case "stop":
+    case "leave":
+      await destroySession(sessions, input.guildId);
+      return { ok: true, action: input.action, message: "Left the voice channel and cleared playback.", session: null };
+    case "current":
+      return {
+        ok: true,
+        action: "current",
+        message: session.currentTrack ? `Now playing ${session.currentTrack.title}.` : "Nothing is playing.",
+        session: queueSnapshot(session),
+        track: session.currentTrack ? summarizeTrack(session.currentTrack) : null
+      };
+    case "queue":
+      return {
+        ok: true,
+        action: "queue",
+        message: session.queue.length ? `There are ${session.queue.length} track${session.queue.length === 1 ? "" : "s"} queued.` : "The queue is empty.",
+        session: queueSnapshot(session)
+      };
+    case "remove": {
+      const index = input.index;
+      if (index == null || !Number.isInteger(index) || index < 1 || index > session.queue.length) {
+        throw new Error("index must point to a queued track.");
+      }
+      const [removed] = session.queue.splice(index - 1, 1);
+      return {
+        ok: true,
+        action: "remove",
+        message: `Removed ${removed.title} from the queue.`,
+        session: queueSnapshot(session),
+        removedTrack: summarizeTrack(removed)
+      };
+    }
+    case "clear": {
+      const removedCount = session.queue.length;
+      session.queue = [];
+      return {
+        ok: true,
+        action: "clear",
+        message: removedCount ? `Cleared ${removedCount} queued track${removedCount === 1 ? "" : "s"}.` : "The queue is already empty.",
+        session: queueSnapshot(session)
+      };
+    }
+    default:
+      throw new Error(`Unknown action: ${input.action}`);
+  }
 }
 
-export function createVoiceManager(client: Client, announce: (channelId: string, content: string) => Promise<void>): VoiceManager {
+export function createVoiceManager(
+  client: Client,
+  config: BridgeConfig,
+  announce: (channelId: string, content: string) => Promise<void>
+): VoiceManager {
   const sessions = sessionsRef.current;
+  getLavalinkManager(client, config);
 
   return {
     describeVoiceContext(guildId, requester) {
       const guild = client.guilds.cache.get(guildId);
       if (!guild) return null;
 
-      const requesterVoice = readRequesterVoiceChannel(guild, requester.userId);
-      const session = getGuildSession(sessions, guildId);
-
-      return {
-        requester: buildRequesterSnapshot({
-          userId: requester.userId,
-          username: requester.username,
-          displayName: requester.displayName,
-          voiceChannelId: requesterVoice?.id ?? null,
-          voiceChannelName: requesterVoice?.name ?? null
-        }),
-        bot: session ? queueSnapshot(session) : null
-      };
+      return buildVoiceContext(guild, requester, sessions);
     },
 
     async queueVoiceTrack(input) {
       const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
-      const requesterVoice = ensureGuildVoiceChannel(guild, input.requesterVoiceChannelId);
+      const requesterVoice = requireUserVoiceChannel(guild, input.requesterId);
+
       if (input.artist?.trim()) {
-        const searchQuery = buildSpotifySearchQuery(input.artist, input.query);
-        const { playDl } = voiceLibraries;
-        try {
-          await ensureSpotifyAuthConfigured();
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : String(error));
-        }
-
-        let searchResults;
-        try {
-          searchResults = await playDl.search(searchQuery, {
-            source: { spotify: "track" },
-            limit: 10
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (message.includes(SPOTIFY_AUTH_ERROR_MESSAGE)) {
-            throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or run play-dl authorization on the VPS, then restart. Send a direct link if you want to play right now.");
-          }
-          throw error;
-        }
-
-        const rankedCandidates = rankArtistBoundTracks(
-          searchResults.map(toMusicSelectionCandidate),
-          input.artist,
-          new Set(getArtistHistory(input.guildId, input.artist))
-        );
-
-        if (!rankedCandidates.length) {
-          throw new Error("Couldn't find a playable version. Send a direct link.");
-        }
-
-        let lastError: unknown = null;
-        for (const candidate of rankedCandidates) {
-          try {
-            const resolved = await resolvePlayableTrackUrl(playDl, candidate.url);
-            const track = await buildTrackFromPlayableUrl(resolved.url, input.requesterId, input.requesterDisplayName);
-            rememberArtistTrack(input.guildId, input.artist, candidate.url);
-            return queueResolvedTrack(client, sessions, announce, "queueVoiceTrack", {
-              bridgeRequestId: input.bridgeRequestId,
-              guildId: input.guildId,
-              requesterId: input.requesterId,
-              requesterDisplayName: input.requesterDisplayName,
-              requesterVoiceChannelId: requesterVoice.id,
-              requesterVoiceChannelName: requesterVoice.name,
-              textChannelId: input.textChannelId,
-              position: input.position
-            }, track);
-          } catch (error) {
-            lastError = error;
-          }
-        }
-
-        console.error(`[poke-discord-bridge] No playable track found for artist "${input.artist}" in guild ${input.guildId}:`, lastError);
-        throw new Error("Couldn't find a playable version. Send a direct link.");
+        return resolveArtistTrack(client, config, sessions, announce, input, requesterVoice);
       }
 
       if (!input.url?.trim()) {
         throw new Error("url is required");
       }
 
-      const track = await buildTrack({
-        requesterId: input.requesterId,
-        requesterDisplayName: input.requesterDisplayName,
-        url: input.url
-      });
-      return queueResolvedTrack(client, sessions, announce, "queueVoiceTrack", {
+      const track = await resolvePlayableTrackForQueue(
+        input.url,
+        null,
+        input.requesterId,
+        input.requesterDisplayName
+      );
+
+      return queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
         bridgeRequestId: input.bridgeRequestId,
         guildId: input.guildId,
         requesterId: input.requesterId,
@@ -636,119 +873,7 @@ export function createVoiceManager(client: Client, announce: (channelId: string,
     },
 
     async controlVoicePlayback(input) {
-      const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
-      const requesterVoice = input.requesterVoiceChannelId ? ensureGuildVoiceChannel(guild, input.requesterVoiceChannelId) : null;
-      const existingSession = getGuildSession(sessions, input.guildId);
-
-      if (input.action !== "join" && !existingSession) {
-        throw new Error("Poke is not in a voice channel in this server.");
-      }
-
-      if (input.action !== "join") {
-        if (!requesterVoice?.id) {
-          throw new Error("Join Poke in the voice channel to control playback.");
-        }
-        if (existingSession && existingSession.voiceChannelId !== requesterVoice.id) {
-          throw new Error(`Poke is in <#${existingSession.voiceChannelId}>. Join that channel to control playback.`);
-        }
-      } else if (existingSession && requesterVoice?.id && existingSession.voiceChannelId !== requesterVoice.id) {
-        throw new Error(`Poke is in <#${existingSession.voiceChannelId}>. Join that channel to control playback.`);
-      }
-
-      let session = existingSession;
-      if (input.action === "join") {
-        if (!requesterVoice?.id) {
-          throw new Error("Join a voice channel first.");
-        }
-
-        if (!session) {
-          session = await createSession(client, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, announce);
-        }
-      }
-
-      if (!session) {
-        throw new Error("Poke is not in a voice channel in this server.");
-      }
-
-      session.textChannelId = input.textChannelId;
-
-      switch (input.action) {
-        case "join": {
-          if (session.voiceChannelId !== requesterVoice?.id) {
-            throw new Error(`Poke is already in <#${session.voiceChannelId}>. Join that channel to control playback.`);
-          }
-          return {
-            ok: true,
-            action: "join",
-            message: `Ready in <#${session.voiceChannelId}>.`,
-            session: queueSnapshot(session)
-          };
-        }
-        case "pause":
-          if (session.player.state.status === "paused" || session.player.state.status === "autopaused") {
-            return { ok: true, action: "pause", message: "Already paused.", session: queueSnapshot(session) };
-          }
-          session.player.pause(true);
-          return { ok: true, action: "pause", message: "Paused playback.", session: queueSnapshot(session) };
-        case "resume":
-          if (session.player.state.status !== "paused" && session.player.state.status !== "autopaused") {
-            return { ok: true, action: "resume", message: "Playback is not paused.", session: queueSnapshot(session) };
-          }
-          session.player.unpause();
-          return { ok: true, action: "resume", message: "Resumed playback.", session: queueSnapshot(session) };
-        case "skip":
-          if (!session.currentTrack) {
-            return { ok: true, action: "skip", message: "Nothing is playing.", session: queueSnapshot(session) };
-          }
-          session.player.stop(true);
-          return { ok: true, action: "skip", message: "Skipped the current track.", session: queueSnapshot(session) };
-        case "stop":
-        case "leave": {
-          destroySession(sessions, input.guildId);
-          return { ok: true, action: input.action, message: "Left the voice channel and cleared playback.", session: null };
-        }
-        case "current":
-          return {
-            ok: true,
-            action: "current",
-            message: session.currentTrack ? `Now playing ${session.currentTrack.title}.` : "Nothing is playing.",
-            session: queueSnapshot(session),
-            track: session.currentTrack ? summarizeTrack(session.currentTrack) : null
-          };
-        case "queue":
-          return {
-            ok: true,
-            action: "queue",
-            message: session.queue.length ? `There are ${session.queue.length} track${session.queue.length === 1 ? "" : "s"} queued.` : "The queue is empty.",
-            session: queueSnapshot(session)
-          };
-        case "remove": {
-          const index = input.index;
-          if (index == null || !Number.isInteger(index) || index < 1 || index > session.queue.length) {
-            throw new Error("index must point to a queued track.");
-          }
-          const [removed] = session.queue.splice(index - 1, 1);
-          return {
-            ok: true,
-            action: "remove",
-            message: `Removed ${removed.title} from the queue.`,
-            session: queueSnapshot(session),
-            removedTrack: summarizeTrack(removed)
-          };
-        }
-        case "clear": {
-          const removedCount = session.queue.length;
-          session.queue = [];
-          return {
-            ok: true,
-            action: "clear",
-            message: removedCount ? `Cleared ${removedCount} queued track${removedCount === 1 ? "" : "s"}.` : "The queue is already empty.",
-            session: queueSnapshot(session)
-          };
-        }
-        default:
-          throw new Error(`Unknown action: ${input.action}`);
-      }
+      return controlVoicePlaybackImpl(client, config, sessions, announce, input);
     },
 
     getSessionSnapshot(guildId) {

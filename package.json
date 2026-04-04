@@ -9,10 +9,9 @@
     "typecheck": "bunx tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@discordjs/voice": "0.19.2",
     "discord.js": "^14.19.3",
-    "ffmpeg-static": "5.3.0",
-    "play-dl": "1.9.7"
+    "play-dl": "1.9.7",
+    "shoukaku": "4.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",

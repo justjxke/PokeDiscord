@@ -41,6 +41,10 @@ export interface BridgeConfig {
   contextMessageCount: number;
   stateSecret: string;
   ownerDiscordUserId: string | null;
+  lavalinkUrl: string;
+  lavalinkPassword: string;
+  lavalinkSecure: boolean;
+  lavalinkName: string;
   bridgeMode: BridgeMode;
 }
 

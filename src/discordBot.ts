@@ -602,7 +602,7 @@ export async function startDiscordBot(
     intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildVoiceStates],
     partials: [Partials.Channel]
   });
-  const voiceManager = createVoiceManager(client, async (channelId, content) => { await sendDiscordMessage(client, channelId, content); });
+  const voiceManager = createVoiceManager(client, config, async (channelId, content) => { await sendDiscordMessage(client, channelId, content); });
 
   client.on("messageCreate", async message => {
     if (message.author.bot) return;

@@ -7,6 +7,8 @@ const DEFAULT_MCP_PORT = 3000;
 const DEFAULT_POKE_API_BASE_URL = "https://poke.com/api/v1";
 const DEFAULT_MCP_HOST = "0.0.0.0";
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 40;
+const DEFAULT_LAVALINK_SECURE = false;
+const DEFAULT_LAVALINK_NAME = "poke-discord-bridge";
 const DOTENV_PATH = join(process.cwd(), ".env");
 
 function loadDotEnv(path = DOTENV_PATH): void {
@@ -37,9 +39,15 @@ export function loadConfig(): BridgeConfig {
     ?? join(process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? ".", ".config"), "poke-discord-bridge", "state.json");
   const stateSecret = process.env.POKE_STATE_SECRET?.trim() || "";
   const ownerDiscordUserId = process.env.POKE_OWNER_DISCORD_USER_ID?.trim() || null;
+  const lavalinkUrl = process.env.POKE_LAVALINK_URL?.trim() || "";
+  const lavalinkPassword = process.env.POKE_LAVALINK_PASSWORD?.trim() || "";
+  const lavalinkSecure = process.env.POKE_LAVALINK_SECURE == null ? DEFAULT_LAVALINK_SECURE : process.env.POKE_LAVALINK_SECURE.trim().toLowerCase() === "true";
+  const lavalinkName = process.env.POKE_LAVALINK_NAME?.trim() || DEFAULT_LAVALINK_NAME;
 
   if (!discordToken.trim()) throw new Error("Missing DISCORD_BOT_TOKEN.");
   if (!stateSecret) throw new Error("Missing POKE_STATE_SECRET.");
+  if (!lavalinkUrl) throw new Error("Missing POKE_LAVALINK_URL.");
+  if (!lavalinkPassword) throw new Error("Missing POKE_LAVALINK_PASSWORD.");
 
   return {
     discordToken: discordToken.trim(),
@@ -50,6 +58,10 @@ export function loadConfig(): BridgeConfig {
     contextMessageCount: readNumber(process.env.POKE_CONTEXT_MESSAGES, DEFAULT_CONTEXT_MESSAGE_COUNT),
     stateSecret,
     ownerDiscordUserId,
+    lavalinkUrl,
+    lavalinkPassword,
+    lavalinkSecure,
+    lavalinkName,
     bridgeMode: "hybrid"
   };
 }
