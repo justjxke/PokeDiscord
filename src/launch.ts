@@ -144,7 +144,13 @@ async function main(): Promise<void> {
 
   let bot: ReturnType<typeof spawn> | null = null;
   log(`Starting Lavalink on ${LAVALINK_HOST}:${LAVALINK_PORT}...`);
-  const lavalink = spawn(JAVA_BIN, ["-jar", LAVALINK_JAR], {
+  const lavalink = spawn(JAVA_BIN, [
+    "-jar",
+    LAVALINK_JAR,
+    `--server.port=${LAVALINK_PORT}`,
+    "--server.address=0.0.0.0",
+    `--lavalink.server.password=${lavalinkPassword}`
+  ], {
     stdio: "inherit",
     env: lavalinkEnv
   });
