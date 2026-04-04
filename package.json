@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts",
+    "start": "bun run src/launch.ts",
     "test": "bun test --pass-with-no-tests",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit"
   },
