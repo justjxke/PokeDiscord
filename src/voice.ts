@@ -304,10 +304,13 @@ function readSpotifyAuthConfig():
   const clientId = process.env.POKE_SPOTIFY_CLIENT_ID?.trim() || "";
   const clientSecret = process.env.POKE_SPOTIFY_CLIENT_SECRET?.trim() || "";
   const refreshToken = process.env.POKE_SPOTIFY_REFRESH_TOKEN?.trim() || "";
-  const market = process.env.POKE_SPOTIFY_MARKET?.trim() || "";
+  const market = process.env.POKE_SPOTIFY_MARKET?.trim().toUpperCase() || "";
 
   const anyConfigured = clientId.length || clientSecret.length || refreshToken.length || market.length;
   if (!anyConfigured) return null;
+  if (!/^[A-Z]{2}$/.test(market)) {
+    throw new Error("POKE_SPOTIFY_MARKET must be a 2-letter country code like US or GB.");
+  }
   if (!clientId || !clientSecret || !refreshToken || !market) {
     throw new Error("POKE_SPOTIFY_CLIENT_ID, POKE_SPOTIFY_CLIENT_SECRET, POKE_SPOTIFY_REFRESH_TOKEN, and POKE_SPOTIFY_MARKET must all be set together.");
   }
