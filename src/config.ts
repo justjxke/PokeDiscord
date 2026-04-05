@@ -61,6 +61,9 @@ export function loadConfig(): BridgeConfig {
     process.env.POKE_YOUTUBE_OAUTH_SKIP_INITIALIZATION,
     youtubeOauthRefreshToken != null
   );
+  const youtubeRemoteCipherUrl = process.env.POKE_YOUTUBE_REMOTE_CIPHER_URL?.trim() || null;
+  const youtubeRemoteCipherPassword = process.env.POKE_YOUTUBE_REMOTE_CIPHER_PASSWORD?.trim() || null;
+  const youtubeRemoteCipherUserAgent = process.env.POKE_YOUTUBE_REMOTE_CIPHER_USER_AGENT?.trim() || null;
 
   if (!discordToken.trim()) throw new Error("Missing DISCORD_BOT_TOKEN.");
   if (!stateSecret) throw new Error("Missing POKE_STATE_SECRET.");
@@ -92,6 +95,9 @@ export function loadConfig(): BridgeConfig {
     youtubeVisitorData,
     youtubeOauthRefreshToken,
     youtubeOauthSkipInitialization,
+    youtubeRemoteCipherUrl,
+    youtubeRemoteCipherPassword,
+    youtubeRemoteCipherUserAgent,
     bridgeMode: "hybrid"
   };
 }

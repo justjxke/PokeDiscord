@@ -7,6 +7,9 @@ interface BuildLavalinkConfigOptions {
   youtubeVisitorData?: string | null;
   youtubeOauthRefreshToken?: string | null;
   youtubeOauthSkipInitialization?: boolean;
+  youtubeRemoteCipherUrl?: string | null;
+  youtubeRemoteCipherPassword?: string | null;
+  youtubeRemoteCipherUserAgent?: string | null;
 }
 
 function escapeYamlString(value: string): string {
@@ -66,6 +69,21 @@ export function buildLavalinkConfig(password: string, options: BuildLavalinkConf
       `      token: "${escapeYamlString(options.youtubePoToken)}"`,
       `      visitorData: "${escapeYamlString(options.youtubeVisitorData)}"`
     );
+  }
+
+  if (options.youtubeRemoteCipherUrl) {
+    lines.push(
+      "    remoteCipher:",
+      `      url: "${escapeYamlString(options.youtubeRemoteCipherUrl)}"`
+    );
+
+    if (options.youtubeRemoteCipherPassword) {
+      lines.push(`      password: "${escapeYamlString(options.youtubeRemoteCipherPassword)}"`);
+    }
+
+    if (options.youtubeRemoteCipherUserAgent) {
+      lines.push(`      userAgent: "${escapeYamlString(options.youtubeRemoteCipherUserAgent)}"`);
+    }
   }
 
   lines.push("");

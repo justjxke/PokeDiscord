@@ -51,6 +51,9 @@ export interface BridgeConfig {
   youtubeVisitorData: string | null;
   youtubeOauthRefreshToken: string | null;
   youtubeOauthSkipInitialization: boolean;
+  youtubeRemoteCipherUrl: string | null;
+  youtubeRemoteCipherPassword: string | null;
+  youtubeRemoteCipherUserAgent: string | null;
   bridgeMode: BridgeMode;
 }
 

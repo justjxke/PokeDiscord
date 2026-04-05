@@ -61,4 +61,20 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain("      skipInitialization: false");
     expect(config).not.toContain("refreshToken:");
   });
+
+  test("includes remote cipher configuration when provided", () => {
+    const config = buildLavalinkConfig("super-secret", {
+      youtubeOauthEnabled: true,
+      youtubeOauthRefreshToken: "refresh-token",
+      youtubeOauthSkipInitialization: true,
+      youtubeRemoteCipherUrl: "https://cipher.kikkia.dev/",
+      youtubeRemoteCipherPassword: "cipher-password",
+      youtubeRemoteCipherUserAgent: "poke-discord-bridge"
+    });
+
+    expect(config).toContain("    remoteCipher:");
+    expect(config).toContain('      url: "https://cipher.kikkia.dev/"');
+    expect(config).toContain('      password: "cipher-password"');
+    expect(config).toContain('      userAgent: "poke-discord-bridge"');
+  });
 });
