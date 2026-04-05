@@ -16,7 +16,7 @@ function escapeYamlString(value: string): string {
 export function buildLavalinkConfig(password: string, options: BuildLavalinkConfigOptions = {}): string {
   const oauthEnabled = Boolean(options.youtubeOauthEnabled || options.youtubeOauthRefreshToken);
   const youtubeClients = oauthEnabled
-    ? ["MUSIC", "TV", "TVHTML5"]
+    ? ["MUSIC", "WEB", "TV", "TVHTML5"]
     : ["MUSIC", "ANDROID_VR", "WEB", "WEBEMBEDDED"];
   const lines = [
     "server:",
@@ -38,7 +38,7 @@ export function buildLavalinkConfig(password: string, options: BuildLavalinkConf
     "    allowDirectPlaylistIds: true",
     "    clientOptions:",
     "      WEB:",
-    "        playback: true",
+    `        playback: ${oauthEnabled ? "false" : "true"}`,
     "        videoLoading: true",
     "        playlistLoading: true",
     "        searching: true",
