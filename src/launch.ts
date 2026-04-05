@@ -328,7 +328,10 @@ async function main(): Promise<void> {
     youtubePoToken: config.youtubePoToken,
     youtubeVisitorData: config.youtubeVisitorData,
     youtubeOauthRefreshToken: config.youtubeOauthRefreshToken,
-    youtubeOauthSkipInitialization: config.youtubeOauthSkipInitialization
+    youtubeOauthSkipInitialization: config.youtubeOauthSkipInitialization,
+    youtubeRemoteCipherUrl: config.youtubeRemoteCipherUrl,
+    youtubeRemoteCipherPassword: config.youtubeRemoteCipherPassword,
+    youtubeRemoteCipherUserAgent: config.youtubeRemoteCipherUserAgent
   }));
   if (config.youtubeOauthEnabled && !config.youtubeOauthRefreshToken) {
     log("YouTube OAuth enrollment mode is enabled. Complete the youtube-source OAuth instructions printed by Lavalink, then persist the resulting refresh token.");
