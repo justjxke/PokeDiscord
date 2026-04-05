@@ -16,7 +16,7 @@ function escapeYamlString(value: string): string {
 export function buildLavalinkConfig(password: string, options: BuildLavalinkConfigOptions = {}): string {
   const oauthEnabled = Boolean(options.youtubeOauthEnabled || options.youtubeOauthRefreshToken);
   const youtubeClients = oauthEnabled
-    ? ["MUSIC", "TV", "TVHTML5EMBEDDED"]
+    ? ["MUSIC", "TV", "TVHTML5"]
     : ["MUSIC", "ANDROID_VR", "WEB", "WEBEMBEDDED"];
   const lines = [
     "server:",

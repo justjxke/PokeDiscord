@@ -35,7 +35,7 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain('      refreshToken: "refresh-token"');
     expect(config).toContain("      skipInitialization: true");
     expect(config).toContain("      - TV");
-    expect(config).toContain("      - TVHTML5EMBEDDED");
+    expect(config).toContain("      - TVHTML5");
     expect(config).not.toContain("      - ANDROID_VR");
   });
 

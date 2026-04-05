@@ -286,7 +286,19 @@ async function resolvePlayableTrackForQueue(
 
   const track = selectLoadResultTrack(result);
   if (!track) {
-    throw new Error("Couldn't find a playable version. Send a direct link.");
+    const detail = (() => {
+      if (result.loadType === "empty") {
+        return "No YouTube matches were returned.";
+      }
+
+      if (result.loadType === "error") {
+        const errorData = result.data as { message?: string; severity?: string; cause?: string; };
+        return errorData.message || errorData.cause || "Lavalink returned an error while resolving the track.";
+      }
+
+      return `Lavalink returned loadType=${result.loadType}.`;
+    })();
+    throw new Error(`Couldn't find a playable version. ${detail} Send a direct link.`);
   }
 
   return buildTrackFromResolvedLavalinkTrack(track, sourceTitle ?? identifier, requesterId, requesterDisplayName);
