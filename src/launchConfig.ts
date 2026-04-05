@@ -17,7 +17,7 @@ export function buildLavalinkConfig(password: string, options: BuildLavalinkConf
   const oauthEnabled = Boolean(options.youtubeOauthEnabled || options.youtubeOauthRefreshToken);
   const poTokenEnabled = Boolean(options.youtubePoToken && options.youtubeVisitorData);
   const youtubeClients = oauthEnabled
-    ? ["MUSIC", "WEB", "TV", "TVHTML5"]
+    ? ["MUSIC", "WEB", "TV", "TVHTML5_SIMPLY"]
     : poTokenEnabled
       ? ["MUSIC", "WEB", "WEBEMBEDDED"]
       : ["MUSIC", "ANDROID_VR", "WEB", "WEBEMBEDDED"];

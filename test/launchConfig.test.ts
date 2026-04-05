@@ -42,7 +42,7 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain("      skipInitialization: true");
     expect(config).toContain("      - WEB");
     expect(config).toContain("      - TV");
-    expect(config).toContain("      - TVHTML5");
+    expect(config).toContain("      - TVHTML5_SIMPLY");
     expect(config).toContain("      WEB:");
     expect(config).toContain("        playback: false");
     expect(config).toContain("        searching: true");
