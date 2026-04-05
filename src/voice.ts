@@ -25,6 +25,7 @@ let lavalinkManager: LavalinkManager | null = null;
 interface VoiceTrack extends DiscordVoiceTrackSummary {
   encoded: string;
   sourceUrl: string;
+  fallbackTracks: LavalinkTrack[];
 }
 
 interface VoiceSession {
@@ -116,6 +117,22 @@ function summarizeTrack(track: VoiceTrack): DiscordVoiceTrackSummary {
     requestedByName: track.requestedByName,
     requestedAt: track.requestedAt
   };
+}
+
+function extractLoadResultTracks(result: LavalinkSearchResponse): LavalinkTrack[] {
+  if (result.loadType === "track") {
+    return [result.data as LavalinkTrack];
+  }
+
+  if (result.loadType === "search") {
+    return result.data as LavalinkTrack[];
+  }
+
+  if (result.loadType === "playlist") {
+    return (result.data as { tracks: LavalinkTrack[] }).tracks;
+  }
+
+  return [];
 }
 
 function summarizeSession(session: VoiceSession): DiscordVoiceSessionSnapshot {
@@ -231,23 +248,12 @@ function getIdealNode(): LavalinkManager | null {
 }
 
 function selectLoadResultTrack(result: LavalinkSearchResponse): LavalinkTrack | null {
-  if (result.loadType === "track") {
-    return result.data as LavalinkTrack;
-  }
-
-  if (result.loadType === "search") {
-    return (result.data as LavalinkTrack[])[0] ?? null;
-  }
-
-  if (result.loadType === "playlist") {
-    return (result.data as { tracks: LavalinkTrack[] }).tracks[0] ?? null;
-  }
-
-  return null;
+  return extractLoadResultTracks(result)[0] ?? null;
 }
 
 function buildTrackFromResolvedLavalinkTrack(
   resolved: LavalinkTrack,
+  fallbackTracks: LavalinkTrack[],
   sourceUrl: string,
   requesterId: string,
   requesterDisplayName: string
@@ -258,9 +264,23 @@ function buildTrackFromResolvedLavalinkTrack(
     url: resolved.info.uri?.trim() || sourceUrl.trim(),
     encoded: resolved.encoded,
     sourceUrl,
+    fallbackTracks,
     requestedByUserId: requesterId,
     requestedByName: requesterDisplayName,
     requestedAt: new Date().toISOString()
+  };
+}
+
+export function selectFallbackVoiceTrack(track: VoiceTrack): VoiceTrack | null {
+  const [nextFallback, ...remainingFallbacks] = track.fallbackTracks;
+  if (!nextFallback) return null;
+
+  return {
+    ...track,
+    title: nextFallback.info.title?.trim() || track.title,
+    url: nextFallback.info.uri?.trim() || track.url,
+    encoded: nextFallback.encoded,
+    fallbackTracks: remainingFallbacks
   };
 }
 
@@ -301,7 +321,14 @@ async function resolvePlayableTrackForQueue(
     throw new Error(`Couldn't find a playable version. ${detail} Send a direct link.`);
   }
 
-  return buildTrackFromResolvedLavalinkTrack(track, sourceTitle ?? identifier, requesterId, requesterDisplayName);
+  const resolvedTracks = extractLoadResultTracks(result);
+  return buildTrackFromResolvedLavalinkTrack(
+    track,
+    resolvedTracks.slice(1),
+    sourceTitle ?? identifier,
+    requesterId,
+    requesterDisplayName
+  );
 }
 
 function buildSpotifySearchQuery(artist: string, query?: string): string {
@@ -474,6 +501,19 @@ async function handleTrackFailure(
 
   const failedTrack = session.currentTrack;
   session.currentTrack = null;
+
+  const fallbackTrack = failedTrack ? selectFallbackVoiceTrack(failedTrack) : null;
+  if (fallbackTrack) {
+    session.currentTrack = fallbackTrack;
+
+    try {
+      await session.player.playTrack({ track: { encoded: fallbackTrack.encoded } });
+      return;
+    } catch (error) {
+      console.error(`[poke-discord-bridge] Failed to play fallback track in guild ${session.guildId}:`, error);
+      session.currentTrack = null;
+    }
+  }
 
   if (failedTrack && session.textChannelId) {
     try {
