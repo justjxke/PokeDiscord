@@ -21,6 +21,12 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain("    pot:");
     expect(config).toContain('      token: "po-token"');
     expect(config).toContain('      visitorData: "visitor-data"');
+    expect(config).toContain("      - WEB");
+    expect(config).toContain("      - WEBEMBEDDED");
+    expect(config).not.toContain("      - TV");
+    expect(config).not.toContain("      - ANDROID_VR");
+    expect(config).toContain("      WEB:");
+    expect(config).toContain("        playback: true");
   });
 
   test("includes oauth configuration when provided", () => {

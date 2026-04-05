@@ -15,9 +15,12 @@ function escapeYamlString(value: string): string {
 
 export function buildLavalinkConfig(password: string, options: BuildLavalinkConfigOptions = {}): string {
   const oauthEnabled = Boolean(options.youtubeOauthEnabled || options.youtubeOauthRefreshToken);
+  const poTokenEnabled = Boolean(options.youtubePoToken && options.youtubeVisitorData);
   const youtubeClients = oauthEnabled
     ? ["MUSIC", "WEB", "TV", "TVHTML5"]
-    : ["MUSIC", "ANDROID_VR", "WEB", "WEBEMBEDDED"];
+    : poTokenEnabled
+      ? ["MUSIC", "WEB", "WEBEMBEDDED"]
+      : ["MUSIC", "ANDROID_VR", "WEB", "WEBEMBEDDED"];
   const lines = [
     "server:",
     `  port: ${LAVALINK_PORT}`,
