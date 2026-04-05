@@ -41,11 +41,13 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain('      refreshToken: "refresh-token"');
     expect(config).toContain("      skipInitialization: true");
     expect(config).toContain("      - WEB");
+    expect(config).toContain("      - WEBEMBEDDED");
     expect(config).toContain("      - TV");
-    expect(config).toContain("      - TVHTML5_SIMPLY");
     expect(config).toContain("      WEB:");
     expect(config).toContain("        playback: false");
     expect(config).toContain("        searching: true");
+    expect(config).toContain("      WEBEMBEDDED:");
+    expect(config).toContain("        playback: false");
   });
 
   test("supports oauth enrollment mode without a refresh token", () => {
