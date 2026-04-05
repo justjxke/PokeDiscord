@@ -292,20 +292,34 @@ async function resolvePlayableTrackForQueue(
     throw new Error("Lavalink is not ready.");
   }
 
-  const identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl, spotifyConfig, undefined, bridgeRequestId);
+  let identifier: string;
+  try {
+    identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl, spotifyConfig, undefined, bridgeRequestId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message || "Failed to resolve a playable track identifier.");
+  }
+
   const node = getIdealNode();
   if (!node) {
     throw new Error("Lavalink is not ready.");
   }
 
-  const result = await node.rest.resolve(identifier);
+  let result: LavalinkSearchResponse | null;
+  try {
+    result = await node.rest.resolve(identifier);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Lavalink loadtracks failure${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
+  }
+
   if (!result) {
-    throw new Error("Lavalink is not ready.");
+    throw new Error(`Lavalink loadtracks failure${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: empty response from node.`);
   }
 
   const track = selectLoadResultTrack(result);
   if (!track) {
-    throw new Error("Couldn't find a playable version. Send a direct link.");
+    throw new Error(`Lavalink loadtracks failure${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: no playable track found.`);
   }
 
   return buildTrackFromResolvedLavalinkTrack(track, sourceTitle ?? sourceUrl, requesterId, requesterDisplayName);
@@ -551,6 +565,7 @@ async function advanceQueue(
     if (!canApplyOperation(session, operationVersion)) return;
     console.error(`[poke-discord-bridge] Failed to play track in guild ${session.guildId}:`, error);
     session.currentTrack = null;
+    const detail = error instanceof Error ? error.message : String(error);
 
     if (session.textChannelId) {
       const channelId = session.textChannelId;
