@@ -38,6 +38,7 @@ interface VoiceSession {
   idleLeaveTimer: NodeJS.Timeout | null;
   player: LavalinkPlayer;
   destroyed: boolean;
+  operationVersion: number;
 }
 
 export interface QueueVoiceTrackInput {
@@ -183,33 +184,48 @@ function clearIdleTimer(session: VoiceSession): void {
   }
 }
 
+function startSessionOperation(session: VoiceSession): number {
+  session.operationVersion += 1;
+  return session.operationVersion;
+}
+
+function canApplyOperation(session: VoiceSession, operationVersion: number): boolean {
+  return !session.destroyed && session.operationVersion === operationVersion;
+}
+
 function scheduleIdleLeave(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
-  announce: (channelId: string, content: string) => Promise<void>
+  announce: (channelId: string, content: string) => Promise<void>,
+  operationVersion: number = session.operationVersion
 ): void {
-  if (session.destroyed || session.idleLeaveAt != null) return;
+  if (!canApplyOperation(session, operationVersion) || session.idleLeaveAt != null) return;
 
   session.idleLeaveAt = Date.now() + IDLE_LEAVE_DELAY_MS;
   const leaveAt = session.idleLeaveAt;
 
   if (session.textChannelId) {
-    void (async () => {
-      try {
-        await announce(session.textChannelId as string, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
-      } catch {
-        // Best effort only.
-      }
-    })();
+    const announcementChannelId = session.textChannelId;
+    void announce(announcementChannelId, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.")
+      .catch(error => {
+        console.error(`[poke-discord-bridge] Failed idle-leave announcement in guild ${session.guildId}:`, error);
+      });
   }
 
   session.idleLeaveTimer = setTimeout(() => {
     void (async () => {
-      const current = sessions.get(session.guildId);
-      if (!current || current.destroyed || current.idleLeaveAt !== leaveAt || current.queue.length || current.currentTrack) {
-        return;
+      try {
+        const current = sessions.get(session.guildId);
+        if (!current || current.destroyed || current.idleLeaveAt !== leaveAt || current.queue.length || current.currentTrack) {
+          return;
+        }
+        if (current.operationVersion !== operationVersion) {
+          return;
+        }
+        await destroySession(sessions, session.guildId, operationVersion);
+      } catch (error) {
+        console.error(`[poke-discord-bridge] Failed idle-leave timeout in guild ${session.guildId}:`, error);
       }
-      await destroySession(sessions, session.guildId);
     })();
   }, IDLE_LEAVE_DELAY_MS);
 }
@@ -391,38 +407,60 @@ async function createSession(
     idleLeaveAt: null,
     idleLeaveTimer: null,
     player,
-    destroyed: false
+    destroyed: false,
+    operationVersion: 0
   };
 
   sessions.set(guildId, session);
 
   player.on("end", event => {
-    void handleTrackCompletion(sessions, session, announce, event.reason);
+    const operationVersion = startSessionOperation(session);
+    void handleTrackCompletion(sessions, session, announce, event.reason, operationVersion)
+      .catch(error => {
+        console.error(`[poke-discord-bridge] Failed end handler in guild ${guildId}:`, error);
+      });
   });
 
   player.on("stuck", event => {
     console.error(`[poke-discord-bridge] Voice track stuck in guild ${guildId}:`, event);
-    void handleTrackFailure(sessions, session, announce, "A track got stuck. Skipping to the next one.");
+    const operationVersion = startSessionOperation(session);
+    void handleTrackFailure(sessions, session, announce, "A track got stuck. Skipping to the next one.", operationVersion)
+      .catch(error => {
+        console.error(`[poke-discord-bridge] Failed stuck handler in guild ${guildId}:`, error);
+      });
   });
 
   player.on("exception", event => {
     console.error(`[poke-discord-bridge] Voice track exception in guild ${guildId}:`, event);
-    void handleTrackFailure(sessions, session, announce, "A track failed to play. Skipping to the next one.");
+    const operationVersion = startSessionOperation(session);
+    void handleTrackFailure(sessions, session, announce, "A track failed to play. Skipping to the next one.", operationVersion)
+      .catch(error => {
+        console.error(`[poke-discord-bridge] Failed exception handler in guild ${guildId}:`, error);
+      });
   });
 
   player.on("closed", event => {
     console.error(`[poke-discord-bridge] Voice player closed in guild ${guildId}:`, event);
-    void destroySession(sessions, guildId);
+    const operationVersion = startSessionOperation(session);
+    void destroySession(sessions, guildId, operationVersion).catch(error => {
+      console.error(`[poke-discord-bridge] Failed closed handler in guild ${guildId}:`, error);
+    });
   });
 
   return session;
 }
 
-async function destroySession(sessions: Map<string, VoiceSession>, guildId: string): Promise<void> {
+async function destroySession(
+  sessions: Map<string, VoiceSession>,
+  guildId: string,
+  operationVersion?: number
+): Promise<void> {
   const session = sessions.get(guildId);
   if (!session || session.destroyed) return;
+  if (operationVersion != null && !canApplyOperation(session, operationVersion)) return;
 
   session.destroyed = true;
+  session.operationVersion += 1;
   clearIdleTimer(session);
   session.queue = [];
   session.currentTrack = null;
@@ -440,16 +478,17 @@ async function handleTrackCompletion(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
-  reason: string
+  reason: string,
+  operationVersion: number
 ): Promise<void> {
-  if (session.destroyed) return;
+  if (!canApplyOperation(session, operationVersion)) return;
 
   const finishedTrack = session.currentTrack;
   session.currentTrack = null;
 
   if (finishedTrack == null) {
     if (!session.queue.length) {
-      scheduleIdleLeave(sessions, session, announce);
+      scheduleIdleLeave(sessions, session, announce, operationVersion);
     }
     return;
   }
@@ -459,7 +498,7 @@ async function handleTrackCompletion(
       await advanceQueue(sessions, session, announce);
       return;
     }
-    scheduleIdleLeave(sessions, session, announce);
+    scheduleIdleLeave(sessions, session, announce, operationVersion);
     return;
   }
 
@@ -468,26 +507,27 @@ async function handleTrackCompletion(
     return;
   }
 
-  scheduleIdleLeave(sessions, session, announce);
+  scheduleIdleLeave(sessions, session, announce, operationVersion);
 }
 
 async function handleTrackFailure(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
-  message: string
+  message: string,
+  operationVersion: number
 ): Promise<void> {
-  if (session.destroyed) return;
+  if (!canApplyOperation(session, operationVersion)) return;
 
   const failedTrack = session.currentTrack;
   session.currentTrack = null;
 
   if (failedTrack && session.textChannelId) {
-    try {
-      await announce(session.textChannelId, `${message} ${failedTrack.title}`);
-    } catch {
-      // Best effort only.
-    }
+    const channelId = session.textChannelId;
+    if (!canApplyOperation(session, operationVersion)) return;
+    await announce(channelId, `${message} ${failedTrack.title}`).catch(error => {
+      console.error(`[poke-discord-bridge] Failed failure announcement in guild ${session.guildId}:`, error);
+    });
   }
 
   if (session.queue.length) {
@@ -495,49 +535,53 @@ async function handleTrackFailure(
     return;
   }
 
-  scheduleIdleLeave(sessions, session, announce);
+  scheduleIdleLeave(sessions, session, announce, operationVersion);
 }
 
 async function advanceQueue(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
-  announce: (channelId: string, content: string) => Promise<void>
+  announce: (channelId: string, content: string) => Promise<void>,
+  operationVersion: number = startSessionOperation(session)
 ): Promise<void> {
-  if (session.destroyed || session.currentTrack) return;
+  if (!canApplyOperation(session, operationVersion) || session.currentTrack) return;
 
+  if (!canApplyOperation(session, operationVersion)) return;
   const nextTrack = session.queue.shift() ?? null;
   if (!nextTrack) {
-    scheduleIdleLeave(sessions, session, announce);
+    scheduleIdleLeave(sessions, session, announce, operationVersion);
     return;
   }
 
+  if (!canApplyOperation(session, operationVersion)) return;
   clearIdleTimer(session);
+  if (!canApplyOperation(session, operationVersion)) return;
   session.currentTrack = nextTrack;
 
   try {
+    if (!canApplyOperation(session, operationVersion)) return;
     await session.player.playTrack({ track: { encoded: nextTrack.encoded } });
   } catch (error) {
+    if (!canApplyOperation(session, operationVersion)) return;
     console.error(`[poke-discord-bridge] Failed to play track in guild ${session.guildId}:`, error);
     session.currentTrack = null;
     const detail = error instanceof Error ? error.message : String(error);
 
     if (session.textChannelId) {
-      try {
-        await announce(
-          session.textChannelId,
-          `Lavalink playback failure: I couldn't play ${nextTrack.title}${detail ? ` (${detail})` : ""}. Skipping it.`
-        );
-      } catch {
-        // Best effort only.
-      }
+      const channelId = session.textChannelId;
+      if (!canApplyOperation(session, operationVersion)) return;
+      await announce(channelId, `I couldn't play ${nextTrack.title}. Skipping it.`).catch(announceError => {
+        console.error(`[poke-discord-bridge] Failed playback error announcement in guild ${session.guildId}:`, announceError);
+      });
     }
 
+    if (!canApplyOperation(session, operationVersion)) return;
     if (session.queue.length) {
       await advanceQueue(sessions, session, announce);
       return;
     }
 
-    scheduleIdleLeave(sessions, session, announce);
+    scheduleIdleLeave(sessions, session, announce, operationVersion);
   }
 }
 
@@ -562,9 +606,16 @@ async function queueResolvedTrack(
     throw new Error(`Poke is already in <#${session.voiceChannelId}>. Join that channel to queue music.`);
   }
 
+  if (session.destroyed) {
+    throw new Error("Voice session is closing. Try again.");
+  }
+
   session.textChannelId = input.textChannelId;
   clearIdleTimer(session);
 
+  if (session.destroyed) {
+    throw new Error("Voice session is closing. Try again.");
+  }
   if (input.position === "front") {
     session.queue.unshift(track);
   } else {
