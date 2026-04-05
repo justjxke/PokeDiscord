@@ -2,6 +2,7 @@ const LAVALINK_PORT = 2334;
 const YOUTUBE_PLUGIN_VERSION = "1.18.0";
 
 interface BuildLavalinkConfigOptions {
+  youtubeOauthEnabled?: boolean;
   youtubePoToken?: string | null;
   youtubeVisitorData?: string | null;
   youtubeOauthRefreshToken?: string | null;
@@ -49,13 +50,12 @@ export function buildLavalinkConfig(password: string, options: BuildLavalinkConf
     "      - WEBEMBEDDED"
   ];
 
-  if (options.youtubeOauthRefreshToken) {
-    lines.push(
-      "    oauth:",
-      "      enabled: true",
-      `      refreshToken: "${escapeYamlString(options.youtubeOauthRefreshToken)}"`,
-      `      skipInitialization: ${options.youtubeOauthSkipInitialization === false ? "false" : "true"}`
-    );
+  if (options.youtubeOauthEnabled || options.youtubeOauthRefreshToken) {
+    lines.push("    oauth:", "      enabled: true");
+    if (options.youtubeOauthRefreshToken) {
+      lines.push(`      refreshToken: "${escapeYamlString(options.youtubeOauthRefreshToken)}"`);
+    }
+    lines.push(`      skipInitialization: ${options.youtubeOauthSkipInitialization === false ? "false" : "true"}`);
   } else if (options.youtubePoToken && options.youtubeVisitorData) {
     lines.push(
       "    pot:",

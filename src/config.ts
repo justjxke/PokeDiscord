@@ -56,7 +56,11 @@ export function loadConfig(): BridgeConfig {
   const youtubePoToken = process.env.POKE_YOUTUBE_POT_TOKEN?.trim() || null;
   const youtubeVisitorData = process.env.POKE_YOUTUBE_VISITOR_DATA?.trim() || null;
   const youtubeOauthRefreshToken = process.env.POKE_YOUTUBE_OAUTH_REFRESH_TOKEN?.trim() || null;
-  const youtubeOauthSkipInitialization = readBoolean(process.env.POKE_YOUTUBE_OAUTH_SKIP_INITIALIZATION, true);
+  const youtubeOauthEnabled = readBoolean(process.env.POKE_YOUTUBE_OAUTH_ENABLED, youtubeOauthRefreshToken != null);
+  const youtubeOauthSkipInitialization = readBoolean(
+    process.env.POKE_YOUTUBE_OAUTH_SKIP_INITIALIZATION,
+    youtubeOauthRefreshToken != null
+  );
 
   if (!discordToken.trim()) throw new Error("Missing DISCORD_BOT_TOKEN.");
   if (!stateSecret) throw new Error("Missing POKE_STATE_SECRET.");
@@ -65,8 +69,8 @@ export function loadConfig(): BridgeConfig {
   if ((youtubePoToken == null) !== (youtubeVisitorData == null)) {
     throw new Error("POKE_YOUTUBE_POT_TOKEN and POKE_YOUTUBE_VISITOR_DATA must be set together.");
   }
-  if (youtubePoToken && youtubeOauthRefreshToken) {
-    throw new Error("POKE_YOUTUBE_POT_TOKEN/POKE_YOUTUBE_VISITOR_DATA and POKE_YOUTUBE_OAUTH_REFRESH_TOKEN are mutually exclusive.");
+  if (youtubePoToken && (youtubeOauthEnabled || youtubeOauthRefreshToken)) {
+    throw new Error("POKE_YOUTUBE_POT_TOKEN/POKE_YOUTUBE_VISITOR_DATA and YouTube OAuth are mutually exclusive.");
   }
 
   return {
@@ -83,6 +87,7 @@ export function loadConfig(): BridgeConfig {
     lavalinkPassword,
     lavalinkSecure,
     lavalinkName,
+    youtubeOauthEnabled,
     youtubePoToken,
     youtubeVisitorData,
     youtubeOauthRefreshToken,

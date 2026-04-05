@@ -324,12 +324,15 @@ async function main(): Promise<void> {
 
   log("Bootstrapping Lavalink...");
   await ensureLavalinkConfig(buildLavalinkConfig(lavalinkPassword, {
+    youtubeOauthEnabled: config.youtubeOauthEnabled,
     youtubePoToken: config.youtubePoToken,
     youtubeVisitorData: config.youtubeVisitorData,
     youtubeOauthRefreshToken: config.youtubeOauthRefreshToken,
     youtubeOauthSkipInitialization: config.youtubeOauthSkipInitialization
   }));
-  if (!config.youtubeOauthRefreshToken && !(config.youtubePoToken && config.youtubeVisitorData)) {
+  if (config.youtubeOauthEnabled && !config.youtubeOauthRefreshToken) {
+    log("YouTube OAuth enrollment mode is enabled. Complete the youtube-source OAuth instructions printed by Lavalink, then persist the resulting refresh token.");
+  } else if (!config.youtubeOauthRefreshToken && !(config.youtubePoToken && config.youtubeVisitorData)) {
     log("YouTube playback is running without OAuth or poToken. Login-gated videos may resolve in search and then fail at playback.");
   }
   await ensureJava();

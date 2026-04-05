@@ -46,6 +46,7 @@ export interface BridgeConfig {
   lavalinkPassword: string;
   lavalinkSecure: boolean;
   lavalinkName: string;
+  youtubeOauthEnabled: boolean;
   youtubePoToken: string | null;
   youtubeVisitorData: string | null;
   youtubeOauthRefreshToken: string | null;

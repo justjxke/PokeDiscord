@@ -25,6 +25,7 @@ describe("buildLavalinkConfig", () => {
 
   test("includes oauth configuration when provided", () => {
     const config = buildLavalinkConfig("super-secret", {
+      youtubeOauthEnabled: true,
       youtubeOauthRefreshToken: "refresh-token",
       youtubeOauthSkipInitialization: true
     });
@@ -33,5 +34,17 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain("      enabled: true");
     expect(config).toContain('      refreshToken: "refresh-token"');
     expect(config).toContain("      skipInitialization: true");
+  });
+
+  test("supports oauth enrollment mode without a refresh token", () => {
+    const config = buildLavalinkConfig("super-secret", {
+      youtubeOauthEnabled: true,
+      youtubeOauthSkipInitialization: false
+    });
+
+    expect(config).toContain("    oauth:");
+    expect(config).toContain("      enabled: true");
+    expect(config).toContain("      skipInitialization: false");
+    expect(config).not.toContain("refreshToken:");
   });
 });
