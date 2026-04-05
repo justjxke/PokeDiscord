@@ -178,6 +178,7 @@ async function main(): Promise<void> {
   });
 
   let shuttingDown = false;
+  let botRestartDelayMs = 1000;
   const shutdown = async (code: number): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -199,19 +200,23 @@ async function main(): Promise<void> {
   await waitForTcpPort(LAVALINK_HOST, LAVALINK_PORT, 120_000);
   log("Lavalink is ready, starting bot...");
 
-  bot = spawn("bun", ["run", "src/index.ts"], {
-    stdio: "inherit",
-    env: process.env
-  });
-
   process.once("SIGINT", () => void shutdown(0));
   process.once("SIGTERM", () => void shutdown(0));
 
-  const [botExitCode, botExitSignal] = await once(bot, "exit") as [number | null, NodeJS.Signals | null];
-  if (!shuttingDown) {
-    const code = botExitCode ?? 1;
-    log(`Bot exited (${botExitCode ?? `signal ${botExitSignal ?? "unknown"}`}).`);
-    await shutdown(code);
+  while (!shuttingDown) {
+    bot = spawn("bun", ["run", "src/index.ts"], {
+      stdio: "inherit",
+      env: process.env
+    });
+
+    const [botExitCode, botExitSignal] = await once(bot, "exit") as [number | null, NodeJS.Signals | null];
+    if (shuttingDown) {
+      return;
+    }
+
+    log(`Bot exited (${botExitCode ?? `signal ${botExitSignal ?? "unknown"}`}). Restarting in ${botRestartDelayMs}ms...`);
+    await new Promise(resolve => setTimeout(resolve, botRestartDelayMs));
+    botRestartDelayMs = Math.min(botRestartDelayMs * 2, 30_000);
   }
 }
 

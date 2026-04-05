@@ -39,6 +39,9 @@ export type PlayDlLike = {
   }): Promise<PlayDlYouTubeVideoLike[]>;
 };
 
+const YOUTUBE_MEDIA_URL_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const youtubeMediaUrlCache = new Map<string, { mediaUrl: string; expiresAt: number }>();
+
 function buildSpotifySearchQuery(track: PlayDlSpotifyTrackLike): string {
   const artists = track.artists?.map(artist => artist.name.trim()).filter(Boolean).join(" ") ?? "";
   return [track.name.trim(), artists].filter(Boolean).join(" ").trim();
@@ -103,12 +106,22 @@ function selectBestYouTubeStreamUrl(info: PlayDlYouTubeInfoLike): string | null 
 }
 
 async function resolveYouTubeMediaUrl(playDl: PlayDlLike, url: string): Promise<string> {
+  const cached = youtubeMediaUrlCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.mediaUrl;
+  }
+
   try {
     const info = await playDl.decipher_info(await playDl.video_info(url), true);
     const mediaUrl = selectBestYouTubeStreamUrl(info);
     if (!mediaUrl) {
       throw new Error("Couldn't find a playable YouTube stream.");
     }
+
+    youtubeMediaUrlCache.set(url, {
+      mediaUrl,
+      expiresAt: Date.now() + YOUTUBE_MEDIA_URL_CACHE_TTL_MS
+    });
 
     return mediaUrl;
   } catch (error) {

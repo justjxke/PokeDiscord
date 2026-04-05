@@ -112,6 +112,43 @@ describe("resolveLavalinkTrackIdentifier", () => {
 
     await expect(
       resolveLavalinkTrackIdentifier(playDl as never, "https://open.spotify.com/track/spotify-track-id", spotifyConfig, spotifyTrackFetcher)
-    ).resolves.toBe("https://www.youtube.com/watch?v=OPf0YbXqDm0&direct=1");
+    ).resolves.toBe("https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18");
+  });
+
+  test("caches resolved youtube media urls to avoid repeated decipher calls", async () => {
+    let videoInfoCalls = 0;
+    let decipherCalls = 0;
+    const playDl = {
+      yt_validate: () => "video" as const,
+      sp_validate: () => false,
+      video_info: async () => {
+        videoInfoCalls += 1;
+        return {
+          format: [
+            {
+              url: "https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18",
+              mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+              audioChannels: 2,
+              bitrate: 477506,
+              qualityLabel: "360p"
+            }
+          ]
+        };
+      },
+      decipher_info: async <T>(data: T) => {
+        decipherCalls += 1;
+        return data;
+      },
+      search: async () => []
+    };
+
+    const trackUrl = "https://www.youtube.com/watch?v=cache-test-123";
+    const first = await resolveLavalinkTrackIdentifier(playDl as never, trackUrl);
+    const second = await resolveLavalinkTrackIdentifier(playDl as never, trackUrl);
+
+    expect(first).toBe("https://rr2---sn-8pgbpohxqp5-aiges.googlevideo.com/videoplayback?itag=18");
+    expect(second).toBe(first);
+    expect(videoInfoCalls).toBe(1);
+    expect(decipherCalls).toBe(1);
   });
 });
