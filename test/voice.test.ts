@@ -6,6 +6,7 @@ import {
   moveVoiceQueueItem,
   normalizeVolume,
   selectFallbackVoiceTrack,
+  shouldAnnounceIdleLeave,
   shuffleVoiceQueue
 } from "../src/voice";
 
@@ -164,5 +165,15 @@ describe("shuffleVoiceQueue", () => {
 describe("moveVoiceQueueItem", () => {
   test("moves a queued track between 1-based positions", () => {
     expect(moveVoiceQueueItem(["a", "b", "c", "d"], 4, 2)).toEqual(["a", "d", "b", "c"]);
+  });
+});
+
+describe("shouldAnnounceIdleLeave", () => {
+  test("stays quiet before any track has started", () => {
+    expect(shouldAnnounceIdleLeave(false)).toBe(false);
+  });
+
+  test("announces once a session has played at least one track", () => {
+    expect(shouldAnnounceIdleLeave(true)).toBe(true);
   });
 });

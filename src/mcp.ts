@@ -62,7 +62,7 @@ const HISTORY_TOOL_DESCRIPTION = "Get recent messages from a Discord channel.";
 const QUEUE_VOICE_TOOL_NAME = "queueVoiceTrack";
 const QUEUE_VOICE_TOOL_DESCRIPTION = "Queue music in the current guild voice session. Use a concrete playable URL with url, or use artist plus optional query for Spotify-first discovery when the user only names an artist or gives a vague music request. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found.";
 const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
-const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session.";
+const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session. For action=volume, always provide value as an explicit integer from 0 to 150.";
 const MAX_BODY_BYTES = 128_000;
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id";
 
@@ -839,24 +839,24 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                 },
                 value: {
                   type: "number",
-                  description: "Volume percentage from 0 to 150 for the volume action."
+                  description: "Required for the volume action. Explicit integer volume percentage from 0 to 150."
                 },
                 positionMs: {
                   type: "number",
-                  description: "Seek target in milliseconds for the seek action."
+                  description: "Required for the seek action. Seek target in milliseconds."
                 },
                 loopMode: {
                   type: "string",
                   enum: ["off", "track", "queue"],
-                  description: "Loop mode for the loop action."
+                  description: "Required for the loop action. Loop mode to apply."
                 },
                 fromIndex: {
                   type: "number",
-                  description: "1-based queue index to move from."
+                  description: "Required for the move action. 1-based queue index to move from."
                 },
                 toIndex: {
                   type: "number",
-                  description: "1-based queue index to move to."
+                  description: "Required for the move action. 1-based queue index to move to."
                 }
               },
               required: ["bridgeRequestId", "action"]

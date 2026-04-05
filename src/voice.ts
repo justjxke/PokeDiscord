@@ -39,6 +39,7 @@ interface VoiceSession {
   textChannelId: string | null;
   queue: VoiceTrack[];
   currentTrack: VoiceTrack | null;
+  hasStartedPlayback: boolean;
   loopMode: LoopMode;
   idleLeaveAt: number | null;
   idleLeaveTimer: NodeJS.Timeout | null;
@@ -212,6 +213,10 @@ function clearIdleTimer(session: VoiceSession): void {
   }
 }
 
+export function shouldAnnounceIdleLeave(hasStartedPlayback: boolean): boolean {
+  return hasStartedPlayback;
+}
+
 function scheduleIdleLeave(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
@@ -222,7 +227,7 @@ function scheduleIdleLeave(
   session.idleLeaveAt = Date.now() + IDLE_LEAVE_DELAY_MS;
   const leaveAt = session.idleLeaveAt;
 
-  if (session.textChannelId) {
+  if (session.textChannelId && shouldAnnounceIdleLeave(session.hasStartedPlayback)) {
     void (async () => {
       try {
         await announce(session.textChannelId as string, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
@@ -434,7 +439,8 @@ async function createSession(
   voiceChannelName: string | null,
   textChannelId: string | null,
   sessions: Map<string, VoiceSession>,
-  announce: (channelId: string, content: string) => Promise<void>
+  announce: (channelId: string, content: string) => Promise<void>,
+  runSerializedOperation: <T>(operation: () => Promise<T>) => Promise<T>
 ): Promise<VoiceSession> {
   const manager = getLavalinkManager(client, config);
   await manager.leaveVoiceChannel(guildId).catch(() => undefined);
@@ -454,6 +460,7 @@ async function createSession(
     textChannelId,
     queue: [],
     currentTrack: null,
+    hasStartedPlayback: false,
     loopMode: "off",
     idleLeaveAt: null,
     idleLeaveTimer: null,
@@ -463,35 +470,46 @@ async function createSession(
 
   sessions.set(guildId, session);
 
+  player.on("start", () => {
+    session.hasStartedPlayback = true;
+    clearIdleTimer(session);
+  });
+
   player.on("end", event => {
-    void handleTrackCompletion(
-      sessions,
-      session,
-      announce,
-      event.reason,
-      typeof event.track?.encoded === "string" ? event.track.encoded : null
+    void runSerializedOperation(() =>
+      handleTrackCompletion(
+        sessions,
+        session,
+        announce,
+        event.reason,
+        typeof event.track?.encoded === "string" ? event.track.encoded : null
+      )
     );
   });
 
   player.on("stuck", event => {
     console.error(`[poke-discord-bridge] Voice track stuck in guild ${guildId}:`, event);
-    void handleTrackFailure(
-      sessions,
-      session,
-      announce,
-      "A track got stuck. Skipping to the next one.",
-      typeof event.track?.encoded === "string" ? event.track.encoded : null
+    void runSerializedOperation(() =>
+      handleTrackFailure(
+        sessions,
+        session,
+        announce,
+        "A track got stuck. Skipping to the next one.",
+        typeof event.track?.encoded === "string" ? event.track.encoded : null
+      )
     );
   });
 
   player.on("exception", event => {
     console.error(`[poke-discord-bridge] Voice track exception in guild ${guildId}:`, event);
-    void handleTrackFailure(
-      sessions,
-      session,
-      announce,
-      "A track failed to play. Skipping to the next one.",
-      typeof event.track?.encoded === "string" ? event.track.encoded : null
+    void runSerializedOperation(() =>
+      handleTrackFailure(
+        sessions,
+        session,
+        announce,
+        "A track failed to play. Skipping to the next one.",
+        typeof event.track?.encoded === "string" ? event.track.encoded : null
+      )
     );
   });
 
@@ -661,6 +679,7 @@ async function queueResolvedTrack(
   config: BridgeConfig,
   sessions: Map<string, VoiceSession>,
   announce: (channelId: string, content: string) => Promise<void>,
+  runSerializedOperation: <T>(operation: () => Promise<T>) => Promise<T>,
   action: "queueVoiceTrack",
   input: Pick<QueueVoiceTrackInput, "bridgeRequestId" | "guildId" | "requesterId" | "requesterDisplayName" | "requesterVoiceChannelId" | "requesterVoiceChannelName" | "textChannelId" | "position">,
   track: VoiceTrack
@@ -670,7 +689,7 @@ async function queueResolvedTrack(
   let session = getGuildSession(sessions, input.guildId);
 
   if (!session) {
-    session = await createSession(client, config, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, sessions, announce);
+    session = await createSession(client, config, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, sessions, announce, runSerializedOperation);
   }
 
   if (session.voiceChannelId !== requesterVoice.id) {
@@ -731,13 +750,47 @@ const recentArtistTracksRef = {
   current: new Map<string, Map<string, string[]>>()
 };
 
+const sessionOperationQueueRef = {
+  current: new Map<string, Promise<void>>()
+};
+
 const ARTIST_HISTORY_LIMIT = 5;
+
+async function runSerializedVoiceOperation<T>(
+  operationQueue: Map<string, Promise<void>>,
+  guildId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const previous = operationQueue.get(guildId) ?? Promise.resolve();
+  const waitForPrevious = previous.catch(() => undefined);
+
+  let release: (() => void) | undefined;
+  const current = new Promise<void>(resolve => {
+    release = resolve;
+  });
+
+  const queued = waitForPrevious.then(() => current);
+  operationQueue.set(guildId, queued);
+
+  try {
+    await waitForPrevious;
+    return await operation();
+  } finally {
+    if (release) {
+      release();
+    }
+    if (operationQueue.get(guildId) === queued) {
+      operationQueue.delete(guildId);
+    }
+  }
+}
 
 async function resolveArtistTrack(
   client: Client,
   config: BridgeConfig,
   sessions: Map<string, VoiceSession>,
   announce: (channelId: string, content: string) => Promise<void>,
+  runSerializedOperation: <T>(operation: () => Promise<T>) => Promise<T>,
   input: QueueVoiceTrackInput,
   requesterVoice: { id: string; name: string | null; }
 ): Promise<VoiceOperationResult> {
@@ -770,7 +823,7 @@ async function resolveArtistTrack(
         artists: candidate.artists.map(name => ({ name }))
       });
       const track = await resolvePlayableTrackForQueue(identifier, candidate.name, input.requesterId, input.requesterDisplayName);
-      const result = await queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
+      const result = await queueResolvedTrack(client, config, sessions, announce, runSerializedOperation, "queueVoiceTrack", {
         bridgeRequestId: input.bridgeRequestId,
         guildId: input.guildId,
         requesterId: input.requesterId,
@@ -824,6 +877,7 @@ async function controlVoicePlaybackImpl(
   config: BridgeConfig,
   sessions: Map<string, VoiceSession>,
   announce: (channelId: string, content: string) => Promise<void>,
+  runSerializedOperation: <T>(operation: () => Promise<T>) => Promise<T>,
   input: ControlVoicePlaybackInput
 ): Promise<VoiceOperationResult> {
   const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
@@ -847,7 +901,7 @@ async function controlVoicePlaybackImpl(
     }
 
     if (!session) {
-      session = await createSession(client, config, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, sessions, announce);
+      session = await createSession(client, config, input.guildId, requesterVoice.id, requesterVoice.name, input.textChannelId, sessions, announce, runSerializedOperation);
     }
   }
 
@@ -905,7 +959,7 @@ async function controlVoicePlaybackImpl(
     case "volume": {
       const volume = normalizeVolume(input.value ?? Number.NaN);
       if (volume == null) {
-        throw new Error("value must be an integer between 0 and 150.");
+        throw new Error("value is required for volume and must be an integer between 0 and 150.");
       }
       await session.player.setVolume(volume);
       return {
@@ -1020,6 +1074,7 @@ export function createVoiceManager(
   announce: (channelId: string, content: string) => Promise<void>
 ): VoiceManager {
   const sessions = sessionsRef.current;
+  const operationQueue = sessionOperationQueueRef.current;
   getLavalinkManager(client, config);
 
   return {
@@ -1031,37 +1086,45 @@ export function createVoiceManager(
     },
 
     async queueVoiceTrack(input) {
-      const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
-      const requesterVoice = requireUserVoiceChannel(guild, input.requesterId);
+      return runSerializedVoiceOperation(operationQueue, input.guildId, async () => {
+        const guild = client.guilds.cache.get(input.guildId) ?? await client.guilds.fetch(input.guildId);
+        const requesterVoice = requireUserVoiceChannel(guild, input.requesterId);
+        const runSessionOperation = <T>(operation: () => Promise<T>) =>
+          runSerializedVoiceOperation(operationQueue, input.guildId, operation);
 
-      if (input.artist?.trim()) {
-        return resolveArtistTrack(client, config, sessions, announce, input, requesterVoice);
-      }
+        if (input.artist?.trim()) {
+          return resolveArtistTrack(client, config, sessions, announce, runSessionOperation, input, requesterVoice);
+        }
 
-      if (!input.url?.trim()) {
-        throw new Error("url is required");
-      }
+        if (!input.url?.trim()) {
+          throw new Error("url is required");
+        }
 
-      const spotifyConfig = input.url.includes("spotify.com/track/") || input.url.startsWith("spotify:track:")
-        ? readSpotifyAuthConfig()
-        : null;
-      const identifier = await resolveLavalinkTrackIdentifier(input.url, spotifyConfig);
-      const track = await resolvePlayableTrackForQueue(identifier, null, input.requesterId, input.requesterDisplayName);
+        const spotifyConfig = input.url.includes("spotify.com/track/") || input.url.startsWith("spotify:track:")
+          ? readSpotifyAuthConfig()
+          : null;
+        const identifier = await resolveLavalinkTrackIdentifier(input.url, spotifyConfig);
+        const track = await resolvePlayableTrackForQueue(identifier, null, input.requesterId, input.requesterDisplayName);
 
-      return queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
-        bridgeRequestId: input.bridgeRequestId,
-        guildId: input.guildId,
-        requesterId: input.requesterId,
-        requesterDisplayName: input.requesterDisplayName,
-        requesterVoiceChannelId: requesterVoice.id,
-        requesterVoiceChannelName: requesterVoice.name,
-        textChannelId: input.textChannelId,
-        position: input.position
-      }, track);
+        return queueResolvedTrack(client, config, sessions, announce, runSessionOperation, "queueVoiceTrack", {
+          bridgeRequestId: input.bridgeRequestId,
+          guildId: input.guildId,
+          requesterId: input.requesterId,
+          requesterDisplayName: input.requesterDisplayName,
+          requesterVoiceChannelId: requesterVoice.id,
+          requesterVoiceChannelName: requesterVoice.name,
+          textChannelId: input.textChannelId,
+          position: input.position
+        }, track);
+      });
     },
 
     async controlVoicePlayback(input) {
-      return controlVoicePlaybackImpl(client, config, sessions, announce, input);
+      return runSerializedVoiceOperation(operationQueue, input.guildId, async () => {
+        const runSessionOperation = <T>(operation: () => Promise<T>) =>
+          runSerializedVoiceOperation(operationQueue, input.guildId, operation);
+        return controlVoicePlaybackImpl(client, config, sessions, announce, runSessionOperation, input);
+      });
     },
 
     getSessionSnapshot(guildId) {
