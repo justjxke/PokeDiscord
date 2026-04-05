@@ -34,6 +34,9 @@ describe("buildLavalinkConfig", () => {
     expect(config).toContain("      enabled: true");
     expect(config).toContain('      refreshToken: "refresh-token"');
     expect(config).toContain("      skipInitialization: true");
+    expect(config).toContain("      - TV");
+    expect(config).toContain("      - TVHTML5EMBEDDED");
+    expect(config).not.toContain("      - ANDROID_VR");
   });
 
   test("supports oauth enrollment mode without a refresh token", () => {
