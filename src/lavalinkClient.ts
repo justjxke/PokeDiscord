@@ -250,6 +250,14 @@ export class LavalinkPlayer extends EventEmitter {
     await this.update({ paused }, false);
   }
 
+  public async setVolume(volume: number): Promise<void> {
+    await this.update({ volume }, true);
+  }
+
+  public async seekTo(position: number): Promise<void> {
+    await this.update({ position }, true);
+  }
+
   public async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -279,7 +287,7 @@ export class LavalinkPlayer extends EventEmitter {
     this.emit("update", json);
   }
 
-  public onPlayerEvent(json: { type: string; reason?: string; }): void {
+  public onPlayerEvent(json: { type: string; reason?: string; track?: { encoded?: string | null } | null; }): void {
     switch (json.type) {
       case "TrackStartEvent":
         this.emit("start", json);
@@ -604,7 +612,7 @@ export class LavalinkManager extends EventEmitter {
         if (!guildId) return;
         const player = this.players.get(guildId);
         if (!player) return;
-        player.onPlayerEvent(json as { type: string; reason?: string; });
+        player.onPlayerEvent(json as { type: string; reason?: string; track?: { encoded?: string | null } | null; });
         if (json.type === "WebSocketClosedEvent") {
           this.players.delete(guildId);
         }

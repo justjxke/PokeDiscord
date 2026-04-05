@@ -117,6 +117,8 @@ export interface DiscordVoiceSessionSnapshot {
   currentTrack: DiscordVoiceTrackSummary | null;
   queue: DiscordVoiceTrackSummary[];
   paused: boolean;
+  volume: number;
+  loopMode: "off" | "track" | "queue";
   idleLeavesAt: string | null;
 }
 

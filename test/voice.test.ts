@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { selectFallbackVoiceTrack } from "../src/voice";
+import {
+  clampSeekPosition,
+  isStaleTrackEvent,
+  moveVoiceQueueItem,
+  normalizeVolume,
+  selectFallbackVoiceTrack,
+  shuffleVoiceQueue
+} from "../src/voice";
 
 describe("selectFallbackVoiceTrack", () => {
   test("promotes the next lavalink fallback track and preserves the remaining fallbacks", () => {
@@ -10,6 +17,8 @@ describe("selectFallbackVoiceTrack", () => {
       url: "https://www.youtube.com/watch?v=primary",
       encoded: "encoded-primary",
       sourceUrl: "ytsearch:test query",
+      lengthMs: 1000,
+      isSeekable: true,
       fallbackTracks: [
         {
           encoded: "encoded-fallback-1",
@@ -66,6 +75,8 @@ describe("selectFallbackVoiceTrack", () => {
       url: "https://www.youtube.com/watch?v=only",
       encoded: "encoded-only",
       sourceUrl: "ytsearch:test query",
+      lengthMs: 1000,
+      isSeekable: true,
       fallbackTracks: [],
       requestedByUserId: "user-1",
       requestedByName: "Jake",
@@ -73,5 +84,85 @@ describe("selectFallbackVoiceTrack", () => {
     });
 
     expect(fallback).toBeNull();
+  });
+});
+
+describe("isStaleTrackEvent", () => {
+  test("returns true when a lavalink event targets a replaced track", () => {
+    expect(
+      isStaleTrackEvent(
+        {
+          id: "voice-track-3",
+          title: "Fallback Track",
+          url: "https://www.youtube.com/watch?v=fallback",
+          encoded: "encoded-fallback",
+          sourceUrl: "ytsearch:test query",
+          lengthMs: 1000,
+          isSeekable: true,
+          fallbackTracks: [],
+          requestedByUserId: "user-1",
+          requestedByName: "Jake",
+          requestedAt: "2026-04-05T16:00:00.000Z"
+        },
+        "encoded-original"
+      )
+    ).toBe(true);
+  });
+
+  test("returns false when the lavalink event matches the current track", () => {
+    expect(
+      isStaleTrackEvent(
+        {
+          id: "voice-track-4",
+          title: "Current Track",
+          url: "https://www.youtube.com/watch?v=current",
+          encoded: "encoded-current",
+          sourceUrl: "ytsearch:test query",
+          lengthMs: 1000,
+          isSeekable: true,
+          fallbackTracks: [],
+          requestedByUserId: "user-1",
+          requestedByName: "Jake",
+          requestedAt: "2026-04-05T16:00:00.000Z"
+        },
+        "encoded-current"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("normalizeVolume", () => {
+  test("accepts integer values within the supported range", () => {
+    expect(normalizeVolume(0)).toBe(0);
+    expect(normalizeVolume(150)).toBe(150);
+    expect(normalizeVolume(87.9)).toBe(87);
+  });
+
+  test("rejects values outside the supported range", () => {
+    expect(normalizeVolume(-1)).toBeNull();
+    expect(normalizeVolume(151)).toBeNull();
+    expect(normalizeVolume(Number.NaN)).toBeNull();
+  });
+});
+
+describe("clampSeekPosition", () => {
+  test("clamps seek targets to the track duration", () => {
+    expect(clampSeekPosition(-1000, 120000)).toBe(0);
+    expect(clampSeekPosition(121000, 120000)).toBe(120000);
+    expect(clampSeekPosition(45555, 120000)).toBe(45555);
+  });
+});
+
+describe("shuffleVoiceQueue", () => {
+  test("shuffles queued tracks without changing membership", () => {
+    const shuffled = shuffleVoiceQueue(["a", "b", "c", "d"], () => 0);
+    expect(shuffled).toEqual(["b", "c", "d", "a"]);
+    expect([...shuffled].sort()).toEqual(["a", "b", "c", "d"]);
+  });
+});
+
+describe("moveVoiceQueueItem", () => {
+  test("moves a queued track between 1-based positions", () => {
+    expect(moveVoiceQueueItem(["a", "b", "c", "d"], 4, 2)).toEqual(["a", "d", "b", "c"]);
   });
 });

@@ -4,9 +4,18 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
 import type { VoiceOperationResult } from "./voice";
 
-type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear";
+type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear" | "volume" | "seek" | "shuffle" | "loop" | "move";
 type QueueVoiceTrackRequest = { bridgeRequestId: string; url?: string; artist?: string; query?: string; position: "front" | "back"; };
-type ControlVoicePlaybackRequest = { bridgeRequestId: string; action: VoiceControlAction; index?: number; };
+type ControlVoicePlaybackRequest = {
+  bridgeRequestId: string;
+  action: VoiceControlAction;
+  index?: number;
+  value?: number;
+  positionMs?: number;
+  loopMode?: "off" | "track" | "queue";
+  fromIndex?: number;
+  toIndex?: number;
+};
 
 interface StartMcpServerOptions {
   host: string;
@@ -366,7 +375,7 @@ function readVoiceAction(value: unknown): VoiceControlAction {
   }
 
   const action = value.trim();
-  const allowed: VoiceControlAction[] = ["join", "pause", "resume", "skip", "stop", "leave", "current", "queue", "remove", "clear"];
+  const allowed: VoiceControlAction[] = ["join", "pause", "resume", "skip", "stop", "leave", "current", "queue", "remove", "clear", "volume", "seek", "shuffle", "loop", "move"];
   if (!allowed.includes(action as VoiceControlAction)) {
     throw new Error(`Unknown action: ${action}`);
   }
@@ -400,7 +409,21 @@ async function handleControlVoicePlaybackToolCall(args: Record<string, unknown>,
 
   const action = readVoiceAction(args.action);
   const index = args.index == null ? undefined : Number(args.index);
-  const result = await onControlVoicePlayback({ bridgeRequestId, action, ...(index == null || Number.isNaN(index) ? {} : { index }) });
+  const value = args.value == null ? undefined : Number(args.value);
+  const positionMs = args.positionMs == null ? undefined : Number(args.positionMs);
+  const fromIndex = args.fromIndex == null ? undefined : Number(args.fromIndex);
+  const toIndex = args.toIndex == null ? undefined : Number(args.toIndex);
+  const loopMode = typeof args.loopMode === "string" ? args.loopMode : undefined;
+  const result = await onControlVoicePlayback({
+    bridgeRequestId,
+    action,
+    ...(index == null || Number.isNaN(index) ? {} : { index }),
+    ...(value == null || Number.isNaN(value) ? {} : { value }),
+    ...(positionMs == null || Number.isNaN(positionMs) ? {} : { positionMs }),
+    ...(fromIndex == null || Number.isNaN(fromIndex) ? {} : { fromIndex }),
+    ...(toIndex == null || Number.isNaN(toIndex) ? {} : { toIndex }),
+    ...(loopMode === "off" || loopMode === "track" || loopMode === "queue" ? { loopMode } : {})
+  });
   return result;
 }
 
@@ -807,12 +830,33 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                 },
                 action: {
                   type: "string",
-                  enum: ["join", "pause", "resume", "skip", "stop", "leave", "current", "queue", "remove", "clear"],
+                  enum: ["join", "pause", "resume", "skip", "stop", "leave", "current", "queue", "remove", "clear", "volume", "seek", "shuffle", "loop", "move"],
                   description: "Voice action to perform."
                 },
                 index: {
                   type: "number",
                   description: "1-based queue index to remove."
+                },
+                value: {
+                  type: "number",
+                  description: "Volume percentage from 0 to 150 for the volume action."
+                },
+                positionMs: {
+                  type: "number",
+                  description: "Seek target in milliseconds for the seek action."
+                },
+                loopMode: {
+                  type: "string",
+                  enum: ["off", "track", "queue"],
+                  description: "Loop mode for the loop action."
+                },
+                fromIndex: {
+                  type: "number",
+                  description: "1-based queue index to move from."
+                },
+                toIndex: {
+                  type: "number",
+                  description: "1-based queue index to move to."
                 }
               },
               required: ["bridgeRequestId", "action"]

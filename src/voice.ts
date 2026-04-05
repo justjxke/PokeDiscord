@@ -25,8 +25,12 @@ let lavalinkManager: LavalinkManager | null = null;
 interface VoiceTrack extends DiscordVoiceTrackSummary {
   encoded: string;
   sourceUrl: string;
+  lengthMs: number;
+  isSeekable: boolean;
   fallbackTracks: LavalinkTrack[];
 }
+
+export type LoopMode = "off" | "track" | "queue";
 
 interface VoiceSession {
   guildId: string;
@@ -35,6 +39,7 @@ interface VoiceSession {
   textChannelId: string | null;
   queue: VoiceTrack[];
   currentTrack: VoiceTrack | null;
+  loopMode: LoopMode;
   idleLeaveAt: number | null;
   idleLeaveTimer: NodeJS.Timeout | null;
   player: LavalinkPlayer;
@@ -65,8 +70,13 @@ export interface ControlVoicePlaybackInput {
   requesterVoiceChannelId: string | null;
   requesterVoiceChannelName: string | null;
   textChannelId: string;
-  action: "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear";
+  action: "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear" | "volume" | "seek" | "shuffle" | "loop" | "move";
   index?: number;
+  value?: number;
+  positionMs?: number;
+  loopMode?: LoopMode;
+  fromIndex?: number;
+  toIndex?: number;
 }
 
 export interface VoiceOperationResult {
@@ -144,6 +154,8 @@ function summarizeSession(session: VoiceSession): DiscordVoiceSessionSnapshot {
     currentTrack: session.currentTrack ? summarizeTrack(session.currentTrack) : null,
     queue: session.queue.map(summarizeTrack),
     paused: session.player.paused,
+    volume: session.player.volume,
+    loopMode: session.loopMode,
     idleLeavesAt: session.idleLeaveAt == null ? null : new Date(session.idleLeaveAt).toISOString()
   };
 }
@@ -264,6 +276,8 @@ function buildTrackFromResolvedLavalinkTrack(
     url: resolved.info.uri?.trim() || sourceUrl.trim(),
     encoded: resolved.encoded,
     sourceUrl,
+    lengthMs: resolved.info.length ?? 0,
+    isSeekable: resolved.info.isSeekable ?? false,
     fallbackTracks,
     requestedByUserId: requesterId,
     requestedByName: requesterDisplayName,
@@ -280,8 +294,40 @@ export function selectFallbackVoiceTrack(track: VoiceTrack): VoiceTrack | null {
     title: nextFallback.info.title?.trim() || track.title,
     url: nextFallback.info.uri?.trim() || track.url,
     encoded: nextFallback.encoded,
+    lengthMs: nextFallback.info.length ?? track.lengthMs,
+    isSeekable: nextFallback.info.isSeekable ?? track.isSeekable,
     fallbackTracks: remainingFallbacks
   };
+}
+
+export function isStaleTrackEvent(currentTrack: VoiceTrack | null, eventTrackEncoded?: string | null): boolean {
+  return Boolean(currentTrack && eventTrackEncoded && currentTrack.encoded !== eventTrackEncoded);
+}
+
+export function normalizeVolume(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  const normalized = Math.trunc(value);
+  return normalized >= 0 && normalized <= 150 ? normalized : null;
+}
+
+export function clampSeekPosition(positionMs: number, trackLengthMs: number): number {
+  return Math.max(0, Math.min(Math.trunc(positionMs), trackLengthMs));
+}
+
+export function shuffleVoiceQueue<T>(queue: T[], random: () => number = Math.random): T[] {
+  const next = [...queue];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [next[index], next[swapIndex]] = [next[swapIndex] as T, next[index] as T];
+  }
+  return next;
+}
+
+export function moveVoiceQueueItem<T>(queue: T[], fromIndex: number, toIndex: number): T[] {
+  const next = [...queue];
+  const [item] = next.splice(fromIndex - 1, 1);
+  next.splice(toIndex - 1, 0, item as T);
+  return next;
 }
 
 async function resolvePlayableTrackForQueue(
@@ -408,6 +454,7 @@ async function createSession(
     textChannelId,
     queue: [],
     currentTrack: null,
+    loopMode: "off",
     idleLeaveAt: null,
     idleLeaveTimer: null,
     player,
@@ -417,17 +464,35 @@ async function createSession(
   sessions.set(guildId, session);
 
   player.on("end", event => {
-    void handleTrackCompletion(sessions, session, announce, event.reason);
+    void handleTrackCompletion(
+      sessions,
+      session,
+      announce,
+      event.reason,
+      typeof event.track?.encoded === "string" ? event.track.encoded : null
+    );
   });
 
   player.on("stuck", event => {
     console.error(`[poke-discord-bridge] Voice track stuck in guild ${guildId}:`, event);
-    void handleTrackFailure(sessions, session, announce, "A track got stuck. Skipping to the next one.");
+    void handleTrackFailure(
+      sessions,
+      session,
+      announce,
+      "A track got stuck. Skipping to the next one.",
+      typeof event.track?.encoded === "string" ? event.track.encoded : null
+    );
   });
 
   player.on("exception", event => {
     console.error(`[poke-discord-bridge] Voice track exception in guild ${guildId}:`, event);
-    void handleTrackFailure(sessions, session, announce, "A track failed to play. Skipping to the next one.");
+    void handleTrackFailure(
+      sessions,
+      session,
+      announce,
+      "A track failed to play. Skipping to the next one.",
+      typeof event.track?.encoded === "string" ? event.track.encoded : null
+    );
   });
 
   player.on("closed", event => {
@@ -460,9 +525,11 @@ async function handleTrackCompletion(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
-  reason: string
+  reason: string,
+  eventTrackEncoded: string | null
 ): Promise<void> {
   if (session.destroyed) return;
+  if (isStaleTrackEvent(session.currentTrack, eventTrackEncoded)) return;
 
   const finishedTrack = session.currentTrack;
   session.currentTrack = null;
@@ -472,6 +539,23 @@ async function handleTrackCompletion(
       scheduleIdleLeave(sessions, session, announce);
     }
     return;
+  }
+
+  if (reason === "finished" && finishedTrack) {
+    if (session.loopMode === "track") {
+      session.currentTrack = finishedTrack;
+      clearIdleTimer(session);
+
+      try {
+        await session.player.playTrack({ track: { encoded: finishedTrack.encoded } });
+        return;
+      } catch (error) {
+        console.error(`[poke-discord-bridge] Failed to replay looped track in guild ${session.guildId}:`, error);
+        session.currentTrack = null;
+      }
+    } else if (session.loopMode === "queue") {
+      session.queue.push(finishedTrack);
+    }
   }
 
   if (reason === "stopped" || reason === "finished" || reason === "replaced" || reason === "cleanup") {
@@ -495,9 +579,11 @@ async function handleTrackFailure(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
-  message: string
+  message: string,
+  eventTrackEncoded: string | null
 ): Promise<void> {
   if (session.destroyed) return;
+  if (isStaleTrackEvent(session.currentTrack, eventTrackEncoded)) return;
 
   const failedTrack = session.currentTrack;
   session.currentTrack = null;
@@ -816,6 +902,69 @@ async function controlVoicePlaybackImpl(
         message: session.queue.length ? `There are ${session.queue.length} track${session.queue.length === 1 ? "" : "s"} queued.` : "The queue is empty.",
         session: queueSnapshot(session)
       };
+    case "volume": {
+      const volume = normalizeVolume(input.value ?? Number.NaN);
+      if (volume == null) {
+        throw new Error("value must be an integer between 0 and 150.");
+      }
+      await session.player.setVolume(volume);
+      return {
+        ok: true,
+        action: "volume",
+        message: `Set volume to ${volume}%.`,
+        session: queueSnapshot(session)
+      };
+    }
+    case "seek": {
+      const positionMs = input.positionMs;
+      if (positionMs == null || !Number.isFinite(positionMs)) {
+        throw new Error("positionMs is required.");
+      }
+      if (!session.currentTrack) {
+        throw new Error("Nothing is playing.");
+      }
+      if (!session.currentTrack.isSeekable) {
+        throw new Error("The current track cannot be seeked.");
+      }
+      const targetPosition = clampSeekPosition(positionMs, session.currentTrack.lengthMs);
+      await session.player.seekTo(targetPosition);
+      return {
+        ok: true,
+        action: "seek",
+        message: `Seeked to ${Math.floor(targetPosition / 1000)}s in ${session.currentTrack.title}.`,
+        session: queueSnapshot(session),
+        track: summarizeTrack(session.currentTrack)
+      };
+    }
+    case "shuffle":
+      if (session.queue.length < 2) {
+        return {
+          ok: true,
+          action: "shuffle",
+          message: "There isn't enough queued music to shuffle.",
+          session: queueSnapshot(session)
+        };
+      }
+      session.queue = shuffleVoiceQueue(session.queue);
+      return {
+        ok: true,
+        action: "shuffle",
+        message: "Shuffled the queue.",
+        session: queueSnapshot(session)
+      };
+    case "loop": {
+      const loopMode = input.loopMode;
+      if (loopMode !== "off" && loopMode !== "track" && loopMode !== "queue") {
+        throw new Error("loopMode must be off, track, or queue.");
+      }
+      session.loopMode = loopMode;
+      return {
+        ok: true,
+        action: "loop",
+        message: loopMode === "off" ? "Looping is off." : loopMode === "track" ? "Looping the current track." : "Looping the queue.",
+        session: queueSnapshot(session)
+      };
+    }
     case "remove": {
       const index = input.index;
       if (index == null || !Number.isInteger(index) || index < 1 || index > session.queue.length) {
@@ -828,6 +977,26 @@ async function controlVoicePlaybackImpl(
         message: `Removed ${removed.title} from the queue.`,
         session: queueSnapshot(session),
         removedTrack: summarizeTrack(removed)
+      };
+    }
+    case "move": {
+      const fromIndex = input.fromIndex;
+      const toIndex = input.toIndex;
+      if (fromIndex == null || toIndex == null || !Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) {
+        throw new Error("fromIndex and toIndex are required.");
+      }
+      if (fromIndex < 1 || fromIndex > session.queue.length || toIndex < 1 || toIndex > session.queue.length) {
+        throw new Error("fromIndex and toIndex must point to queued tracks.");
+      }
+      if (fromIndex === toIndex) {
+        throw new Error("fromIndex and toIndex must be different.");
+      }
+      session.queue = moveVoiceQueueItem(session.queue, fromIndex, toIndex);
+      return {
+        ok: true,
+        action: "move",
+        message: `Moved queue item ${fromIndex} to ${toIndex}.`,
+        session: queueSnapshot(session)
       };
     }
     case "clear": {

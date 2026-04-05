@@ -89,7 +89,7 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       "When you want to edit a message the bridge already sent, call editDiscordMessage with the message id and new content or embeds.",
       "When you want to delete a message the bridge already sent, call deleteDiscordMessage with the message id.",
       "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id.",
-      "When you want to join or control voice playback, use queueVoiceTrack for either a concrete playable url or an artist-bound music request with artist and optional query. Use controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, and clear."
+      "When you want to join or control voice playback, use queueVoiceTrack for either a concrete playable url or an artist-bound music request with artist and optional query. Use queueVoiceTrack with position=front when the user wants play next. Use controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, clear, volume, seek, shuffle, loop, and move."
     );
   } else {
     lines.push("", "Use the same direct style, but keep responses grounded and safe.");
