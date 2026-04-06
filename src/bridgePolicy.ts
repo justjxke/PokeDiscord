@@ -4,7 +4,6 @@ import type {
   BridgeState,
   EncryptedSecret,
   GuildInstallationState,
-  GroupInstallationState,
   OwnerBridgeState,
   TenantReference,
   UserBridgeState
@@ -104,27 +103,6 @@ function normalizeGuildInstallation(value: unknown, stateSecret: string): GuildI
   };
 }
 
-function normalizeGroupInstallation(value: unknown, stateSecret: string): GroupInstallationState | null {
-  if (!isRecord(value)) return null;
-
-  const installedByUserId = typeof value.installedByUserId === "string" ? value.installedByUserId : "";
-  const installedAt = typeof value.installedAt === "number" ? value.installedAt : Date.now();
-  const updatedAt = typeof value.updatedAt === "number" ? value.updatedAt : installedAt;
-  const linkedAt = typeof value.linkedAt === "number" ? value.linkedAt : null;
-  const encryptedPokeApiKey = readEncryptedSecret(value.encryptedPokeApiKey)
-    ?? migrateLegacySecret(value.pokeApiKey, stateSecret, linkedAt ?? installedAt);
-
-  if (!installedByUserId) return null;
-
-  return {
-    installedByUserId,
-    installedAt,
-    updatedAt,
-    linkedAt,
-    encryptedPokeApiKey
-  };
-}
-
 function normalizeUsers(value: unknown, stateSecret: string): Record<string, UserBridgeState> {
   if (!isRecord(value)) return {};
 
@@ -149,18 +127,6 @@ function normalizeGuildInstallations(value: unknown, stateSecret: string): Recor
   return guildInstallations;
 }
 
-function normalizeGroupInstallations(value: unknown, stateSecret: string): Record<string, GroupInstallationState> {
-  if (!isRecord(value)) return {};
-
-  const groupInstallations: Record<string, GroupInstallationState> = {};
-  for (const [channelId, entry] of Object.entries(value)) {
-    const normalized = normalizeGroupInstallation(entry, stateSecret);
-    if (normalized) groupInstallations[channelId] = normalized;
-  }
-
-  return groupInstallations;
-}
-
 export function createDefaultState(_mode: BridgeMode = "hybrid"): BridgeState {
   return {
     mode: "hybrid",
@@ -172,7 +138,6 @@ export function createDefaultState(_mode: BridgeMode = "hybrid"): BridgeState {
     },
     users: {},
     guildInstallations: {},
-    groupInstallations: {},
     recentMessageIds: []
   };
 }
@@ -200,7 +165,6 @@ export function normalizeState(raw: unknown, stateSecret: string, _fallbackMode:
     owner,
     users: normalizeUsers(raw.users, stateSecret),
     guildInstallations: normalizeGuildInstallations(raw.guildInstallations, stateSecret),
-    groupInstallations: normalizeGroupInstallations(raw.groupInstallations, stateSecret),
     recentMessageIds: readStringArray(raw.recentMessageIds)
   };
 }
@@ -276,23 +240,6 @@ export function installGuildChannel(state: BridgeState, guildId: string, install
   };
 }
 
-export function setGroupKey(state: BridgeState, channelId: string, installedByUserId: string, encryptedPokeApiKey: EncryptedSecret): BridgeState {
-  const existing = state.groupInstallations[channelId];
-  return {
-    ...state,
-    groupInstallations: {
-      ...state.groupInstallations,
-      [channelId]: {
-        installedByUserId,
-        installedAt: existing?.installedAt ?? Date.now(),
-        updatedAt: Date.now(),
-        linkedAt: existing?.linkedAt ?? Date.now(),
-        encryptedPokeApiKey
-      }
-    }
-  };
-}
-
 export function setGuildKey(state: BridgeState, guildId: string, installedByUserId: string, encryptedPokeApiKey: EncryptedSecret): BridgeState {
   const existing = state.guildInstallations[guildId];
   if (!existing) {
@@ -339,27 +286,11 @@ export function removeGuildInstallation(state: BridgeState, guildId: string): Br
   };
 }
 
-export function removeGroupInstallation(state: BridgeState, channelId: string): BridgeState {
-  if (!state.groupInstallations[channelId]) return state;
-
-  const nextGroupInstallations = { ...state.groupInstallations };
-  delete nextGroupInstallations[channelId];
-
-  return {
-    ...state,
-    groupInstallations: nextGroupInstallations
-  };
-}
-
 export function isGuildChannelAllowed(state: BridgeState, guildId: string, channelId: string): boolean {
   const installation = state.guildInstallations[guildId];
   if (!installation) return false;
   if (!installation.allowedChannelIds.length) return false;
   return installation.allowedChannelIds.includes(channelId);
-}
-
-export function isGroupChannelInstalled(state: BridgeState, channelId: string): boolean {
-  return state.groupInstallations[channelId]?.encryptedPokeApiKey != null;
 }
 
 export function buildPromptGuardrails(): string[] {
@@ -383,11 +314,6 @@ export function getTenantPokeSecret(state: BridgeState, tenant: TenantReference,
     return user?.encryptedPokeApiKey ? decryptTenantSecret(user.encryptedPokeApiKey, stateSecret) : null;
   }
 
-  if (tenant.kind === "group") {
-    const groupInstallation = state.groupInstallations[tenant.id];
-    return groupInstallation?.encryptedPokeApiKey ? decryptTenantSecret(groupInstallation.encryptedPokeApiKey, stateSecret) : null;
-  }
-
   const guildInstallation = state.guildInstallations[tenant.id];
   return guildInstallation?.encryptedPokeApiKey ? decryptTenantSecret(guildInstallation.encryptedPokeApiKey, stateSecret) : null;
 }
@@ -395,6 +321,5 @@ export function getTenantPokeSecret(state: BridgeState, tenant: TenantReference,
 export function getTenantDisplayLabel(state: BridgeState, tenant: TenantReference): string {
   if (tenant.kind === "owner") return "owner";
   if (tenant.kind === "user") return `user ${tenant.id}`;
-  if (tenant.kind === "group") return `group ${tenant.id}`;
   return `guild ${tenant.id}`;
 }

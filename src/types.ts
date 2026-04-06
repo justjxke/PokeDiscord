@@ -1,5 +1,5 @@
 export type BridgeMode = "hybrid";
-export type TenantKind = "owner" | "user" | "guild" | "group";
+export type TenantKind = "owner" | "user" | "guild";
 
 export interface EncryptedSecret {
   algorithm: "aes-256-gcm";
@@ -29,14 +29,6 @@ export interface GuildInstallationState {
   updatedAt: number;
   linkedAt: number | null;
   allowedChannelIds: string[];
-  encryptedPokeApiKey: EncryptedSecret | null;
-}
-
-export interface GroupInstallationState {
-  installedByUserId: string;
-  installedAt: number;
-  updatedAt: number;
-  linkedAt: number | null;
   encryptedPokeApiKey: EncryptedSecret | null;
 }
 
@@ -70,7 +62,6 @@ export interface BridgeState {
   owner: OwnerBridgeState;
   users: Record<string, UserBridgeState>;
   guildInstallations: Record<string, GuildInstallationState>;
-  groupInstallations: Record<string, GroupInstallationState>;
   recentMessageIds: string[];
 }
 
@@ -172,7 +163,7 @@ export interface DiscordMessageContext {
 export interface DiscordReplyTarget {
   channelId: string;
   label: string | null;
-  mode: "dm" | "guild" | "group";
+  mode: "dm" | "guild";
   createdAt: number;
 }
 
@@ -193,7 +184,7 @@ export interface DiscordRelayRequest {
   discordUserId: string;
   discordChannelId: string;
   discordMessageId: string;
-  mode: "dm" | "guild" | "group";
+  mode: "dm" | "guild";
   prompt: string;
   replyTarget: DiscordReplyTarget;
   attachments: DiscordAttachmentContext[];

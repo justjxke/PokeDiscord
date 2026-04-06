@@ -204,7 +204,6 @@ async function main(): Promise<void> {
   const loadHealthStatus = async () => {
     const state = await loadState(config.statePath, config.stateSecret);
     const installationCount = Object.keys(state.guildInstallations).length;
-    const groupInstallationCount = Object.keys(state.groupInstallations).length;
     const linkedUsers = Object.values(state.users).filter(user => user.encryptedPokeApiKey != null).length;
     return {
       ok: true,
@@ -212,8 +211,7 @@ async function main(): Promise<void> {
       ownerLinked: state.owner.encryptedPokeApiKey != null,
       linkedUsers,
       installedGuilds: installationCount,
-      installedGroupChats: groupInstallationCount,
-      linkedTenants: (state.owner.encryptedPokeApiKey ? 1 : 0) + linkedUsers + installationCount + groupInstallationCount,
+      linkedTenants: (state.owner.encryptedPokeApiKey ? 1 : 0) + linkedUsers + installationCount,
       workerReady: worker?.ready ?? false,
       workerDiscordTag: worker?.discordTag ?? null,
       lavalinkReady
