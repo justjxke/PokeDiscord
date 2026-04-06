@@ -16,7 +16,7 @@ describe("group chat bridge state", () => {
   test("stores, decrypts, and removes shared group installs", () => {
     const encrypted = encryptTenantSecret("poke-api-key", "state-secret", 1234);
     const initial = createDefaultState();
-    const installed = setGroupKey(initial, "group-channel-1", "installer-1", encrypted);
+    const installed = setGroupKey(initial, "group-channel-1", "installer-1", "justjxke", encrypted);
 
     expect(isGroupChannelInstalled(installed, "group-channel-1")).toBe(true);
     expect(getTenantPokeSecret(installed, { kind: "group", id: "group-channel-1" }, "state-secret")).toBe("poke-api-key");
@@ -33,6 +33,7 @@ describe("group chat bridge state", () => {
         groupInstallations: {
           "group-channel-2": {
             installedByUserId: "installer-2",
+            installedByUsername: "justjxke",
             installedAt: 1111,
             updatedAt: 2222,
             linkedAt: 3333,

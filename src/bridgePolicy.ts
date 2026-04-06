@@ -108,16 +108,22 @@ function normalizeGroupInstallation(value: unknown, stateSecret: string): GroupI
   if (!isRecord(value)) return null;
 
   const installedByUserId = typeof value.installedByUserId === "string" ? value.installedByUserId : "";
+  const installedByUsername = typeof value.installedByUsername === "string"
+    ? value.installedByUsername
+    : typeof value.installedByUserName === "string"
+      ? value.installedByUserName
+      : "";
   const installedAt = typeof value.installedAt === "number" ? value.installedAt : Date.now();
   const updatedAt = typeof value.updatedAt === "number" ? value.updatedAt : installedAt;
   const linkedAt = typeof value.linkedAt === "number" ? value.linkedAt : null;
   const encryptedPokeApiKey = readEncryptedSecret(value.encryptedPokeApiKey)
     ?? migrateLegacySecret(value.pokeApiKey, stateSecret, linkedAt ?? installedAt);
 
-  if (!installedByUserId) return null;
+  if (!installedByUserId || !installedByUsername) return null;
 
   return {
     installedByUserId,
+    installedByUsername,
     installedAt,
     updatedAt,
     linkedAt,
@@ -276,7 +282,7 @@ export function installGuildChannel(state: BridgeState, guildId: string, install
   };
 }
 
-export function setGroupKey(state: BridgeState, channelId: string, installedByUserId: string, encryptedPokeApiKey: EncryptedSecret): BridgeState {
+export function setGroupKey(state: BridgeState, channelId: string, installedByUserId: string, installedByUsername: string, encryptedPokeApiKey: EncryptedSecret): BridgeState {
   const existing = state.groupInstallations[channelId];
   return {
     ...state,
@@ -284,6 +290,7 @@ export function setGroupKey(state: BridgeState, channelId: string, installedByUs
       ...state.groupInstallations,
       [channelId]: {
         installedByUserId,
+        installedByUsername,
         installedAt: existing?.installedAt ?? Date.now(),
         updatedAt: Date.now(),
         linkedAt: existing?.linkedAt ?? Date.now(),

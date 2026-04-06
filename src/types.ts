@@ -34,6 +34,7 @@ export interface GuildInstallationState {
 
 export interface GroupInstallationState {
   installedByUserId: string;
+  installedByUsername: string;
   installedAt: number;
   updatedAt: number;
   linkedAt: number | null;

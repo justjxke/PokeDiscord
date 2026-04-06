@@ -115,13 +115,13 @@ function getChannelLabel(channel: Message["channel"] | ChatInputCommandInteracti
 
 function isGroupDmChannel(
   channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined
-): channel is Message["channel"] & { type: ChannelType.GroupDM; recipients?: { keys: () => IterableIterator<string>; }; } {
+): channel is Message["channel"] & { type: ChannelType.GroupDM; recipients?: { map: <T>(callbackfn: (value: { username: string; }, index: number, array: { username: string; }[]) => T) => T[]; }; } {
   return Boolean(channel && channel.isTextBased() && channel.type === ChannelType.GroupDM);
 }
 
-function getGroupRecipientIds(channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined): Set<string> | null {
+function getGroupRecipientUsernames(channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined): Set<string> | null {
   if (!isGroupDmChannel(channel) || !("recipients" in channel) || !channel.recipients) return null;
-  return new Set(Array.from(channel.recipients.keys(), key => String(key)));
+  return new Set(channel.recipients.map(recipient => recipient.username.toLowerCase()));
 }
 
 function buildReplyTarget(channelId: string, label: string | null, mode: DiscordReplyTarget["mode"]): DiscordReplyTarget {
@@ -453,8 +453,8 @@ async function resolveActiveGroupInstallation(
   const installation = state.groupInstallations[channelId];
   if (!installation) return null;
 
-  const recipientIds = getGroupRecipientIds(messageOrInteractionChannel);
-  if (recipientIds && !recipientIds.has(installation.installedByUserId)) {
+  const recipientUsernames = getGroupRecipientUsernames(messageOrInteractionChannel);
+  if (recipientUsernames && !recipientUsernames.has(installation.installedByUsername.toLowerCase())) {
     const nextState = removeGroupInstallation(state, channelId);
     Object.assign(state, nextState);
     await updateState(state);
@@ -474,7 +474,14 @@ export function isTenantLinked(state: BridgeState, tenant: TenantReference): boo
   return Boolean(tenantSecret?.encryptedPokeApiKey);
 }
 
-function setTenantSecretState(state: BridgeState, tenant: TenantReference, encryptedPokeApiKey: ReturnType<typeof encryptTenantSecret>, discordUserId: string, dmChannelId: string): BridgeState {
+function setTenantSecretState(
+  state: BridgeState,
+  tenant: TenantReference,
+  encryptedPokeApiKey: ReturnType<typeof encryptTenantSecret>,
+  discordUserId: string,
+  discordUsername: string,
+  dmChannelId: string
+): BridgeState {
   if (tenant.kind === "owner") {
     return setOwnerLink(state, discordUserId, dmChannelId, encryptedPokeApiKey);
   }
@@ -484,7 +491,7 @@ function setTenantSecretState(state: BridgeState, tenant: TenantReference, encry
   }
 
   if (tenant.kind === "group") {
-    return setGroupKey(state, tenant.id, discordUserId, encryptedPokeApiKey);
+    return setGroupKey(state, tenant.id, discordUserId, discordUsername, encryptedPokeApiKey);
   }
 
   const nextState = setGuildKey(state, tenant.id, discordUserId, encryptedPokeApiKey);
@@ -770,7 +777,7 @@ export async function startDiscordBot(
             return;
           }
 
-          const nextState = setTenantSecretState(state, tenant, encrypted, interaction.user.id, dmChannelId);
+          const nextState = setTenantSecretState(state, tenant, encrypted, interaction.user.id, interaction.user.username, dmChannelId);
           Object.assign(state, nextState);
           await updateState(state);
           await interaction.reply({ content: `Linked ${tenant.kind === "owner" ? "owner" : "your account"} to Poke.`, ephemeral: false });
@@ -795,7 +802,7 @@ export async function startDiscordBot(
           }
 
           const encrypted = encryptTenantSecret(apiKey, config.stateSecret);
-          const nextState = setGroupKey(state, interaction.channelId, interaction.user.id, encrypted);
+          const nextState = setGroupKey(state, interaction.channelId, interaction.user.id, interaction.user.username, encrypted);
           Object.assign(state, nextState);
           await updateState(state);
           await interaction.reply({ content: "Poke is now enabled in this group chat.", ephemeral: false });
