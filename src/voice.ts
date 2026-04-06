@@ -532,6 +532,20 @@ async function destroySession(sessions: Map<string, VoiceSession>, guildId: stri
   sessions.delete(guildId);
 }
 
+async function replayLoopedTrack(session: VoiceSession, track: VoiceTrack, context: string): Promise<boolean> {
+  session.currentTrack = track;
+  clearIdleTimer(session);
+
+  try {
+    await session.player.playTrack({ track: { encoded: track.encoded }, position: 0 });
+    return true;
+  } catch (error) {
+    console.error(`[poke-discord-bridge] Failed to replay looped track in guild ${session.guildId} during ${context}:`, error);
+    session.currentTrack = track;
+    return false;
+  }
+}
+
 export async function handleTrackCompletion(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
@@ -554,16 +568,8 @@ export async function handleTrackCompletion(
 
   if (reason === "finished" && finishedTrack) {
     if (session.loopMode === "track") {
-      session.currentTrack = finishedTrack;
-      clearIdleTimer(session);
-
-      try {
-        await session.player.playTrack({ track: { encoded: finishedTrack.encoded }, position: 0 });
-        return;
-      } catch (error) {
-        console.error(`[poke-discord-bridge] Failed to replay looped track in guild ${session.guildId}:`, error);
-        session.currentTrack = null;
-      }
+      await replayLoopedTrack(session, finishedTrack, "track completion");
+      return;
     } else if (session.loopMode === "queue") {
       session.queue.push(finishedTrack);
     }
@@ -593,7 +599,7 @@ export async function handleTrackCompletion(
   scheduleIdleLeave(sessions, session);
 }
 
-async function handleTrackFailure(
+export async function handleTrackFailure(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
@@ -604,6 +610,12 @@ async function handleTrackFailure(
   if (isStaleTrackEvent(session.currentTrack, eventTrackEncoded)) return;
 
   const failedTrack = session.currentTrack;
+
+  if (session.loopMode === "track" && failedTrack) {
+    await replayLoopedTrack(session, failedTrack, "track failure");
+    return;
+  }
+
   session.currentTrack = null;
 
   const fallbackTrack = failedTrack ? selectFallbackVoiceTrack(failedTrack) : null;
