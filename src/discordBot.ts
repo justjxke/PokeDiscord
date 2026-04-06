@@ -115,26 +115,13 @@ function getChannelLabel(channel: Message["channel"] | ChatInputCommandInteracti
 
 function isGroupDmChannel(
   channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined
-): channel is Message["channel"] & { type: ChannelType.GroupDM; recipients?: unknown; } {
+): channel is Message["channel"] & { type: ChannelType.GroupDM; recipients?: { map: <T>(callbackfn: (value: { username: string; }, index: number, array: { username: string; }[]) => T) => T[]; }; } {
   return Boolean(channel && channel.isTextBased() && channel.type === ChannelType.GroupDM);
 }
 
 function getGroupRecipientUsernames(channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined): Set<string> | null {
   if (!isGroupDmChannel(channel) || !("recipients" in channel) || !channel.recipients) return null;
-  if (!Array.isArray(channel.recipients)) return null;
-
-  const recipients = channel.recipients as unknown[];
-  const usernames = recipients
-    .map(recipient => {
-      if (typeof recipient === "string") return recipient.trim().toLowerCase();
-      if (typeof recipient === "object" && recipient != null && "username" in recipient && typeof recipient.username === "string") {
-        return recipient.username.trim().toLowerCase();
-      }
-      return null;
-    })
-    .filter((username): username is string => username != null && username.length > 0);
-
-  return usernames.length ? new Set(usernames) : null;
+  return new Set(channel.recipients.map(recipient => recipient.username.toLowerCase()));
 }
 
 function buildReplyTarget(channelId: string, label: string | null, mode: DiscordReplyTarget["mode"]): DiscordReplyTarget {
