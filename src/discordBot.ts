@@ -24,7 +24,9 @@ import {
   clearUserLink,
   installGuildChannel,
   isGuildChannelAllowed,
+  removeGroupInstallation,
   removeGuildInstallation,
+  setGroupKey,
   setGuildKey,
   setOwnerLink,
   setUserLink
@@ -43,6 +45,7 @@ import type {
   DiscordReplyTarget,
   DiscordRelayRequest,
   DiscordVoiceContext,
+  GroupInstallationState,
   PokeSendResult,
   TenantReference
 } from "./types";
@@ -52,10 +55,19 @@ const COMMAND_NAME = "poke";
 const COMMAND_PREFIX = "!";
 const DM_KEY_REGEX = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const DM_SETUP_MODAL_PREFIX = "poke-dm-setup";
+const GROUP_SETUP_MODAL_PREFIX = "poke-group-setup";
 const GUILD_SETUP_MODAL_PREFIX = "poke-guild-setup";
 
 function isDmMessage(message: Message): boolean {
   return message.guildId == null;
+}
+
+function isGroupDmMessage(message: Message): boolean {
+  return message.guildId == null && message.channel.type === ChannelType.GroupDM;
+}
+
+function isGroupDmInteraction(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): boolean {
+  return interaction.inGuild() ? false : interaction.channel?.type === ChannelType.GroupDM;
 }
 
 function isSendableChannel(channel: unknown): channel is { send: (content: string | { content?: string; reply?: { messageReference: string; failIfNotExists: boolean; }; files?: AttachmentBuilder[]; embeds?: EmbedBuilder[]; }) => Promise<{ id: string }>; isTextBased: () => boolean; } {
@@ -99,6 +111,17 @@ function getCommandAttachments(interaction: ChatInputCommandInteraction): Discor
 function getChannelLabel(channel: Message["channel"] | ChatInputCommandInteraction["channel"]): string | null {
   if (!channel || !channel.isTextBased() || !("name" in channel) || typeof channel.name !== "string") return null;
   return `#${channel.name}`;
+}
+
+function isGroupDmChannel(
+  channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined
+): channel is Message["channel"] & { type: ChannelType.GroupDM; recipients?: { keys: () => IterableIterator<string>; }; } {
+  return Boolean(channel && channel.isTextBased() && channel.type === ChannelType.GroupDM);
+}
+
+function getGroupRecipientIds(channel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined): Set<string> | null {
+  if (!isGroupDmChannel(channel) || !("recipients" in channel) || !channel.recipients) return null;
+  return new Set(Array.from(channel.recipients.keys(), key => String(key)));
 }
 
 function buildReplyTarget(channelId: string, label: string | null, mode: DiscordReplyTarget["mode"]): DiscordReplyTarget {
@@ -311,6 +334,10 @@ function getTenantForGuild(guildId: string): TenantReference {
   return { kind: "guild", id: guildId };
 }
 
+function getTenantForGroup(channelId: string): TenantReference {
+  return { kind: "group", id: channelId };
+}
+
 function buildSetupModal(customId: string, title: string): ModalBuilder {
   const modal = new ModalBuilder()
     .setCustomId(customId)
@@ -331,6 +358,10 @@ export function buildGuildSetupModal(guildId: string, channelId: string, userId:
   return buildSetupModal(`${GUILD_SETUP_MODAL_PREFIX}:${guildId}:${channelId}:${userId}`, "Link Poke to this server");
 }
 
+export function buildGroupSetupModal(channelId: string, userId: string): ModalBuilder {
+  return buildSetupModal(`${GROUP_SETUP_MODAL_PREFIX}:${channelId}:${userId}`, "Link Poke to this group chat");
+}
+
 export function buildDmSetupModal(userId: string): ModalBuilder {
   return buildSetupModal(`${DM_SETUP_MODAL_PREFIX}:${userId}`, "Link Poke to this account");
 }
@@ -349,10 +380,21 @@ export function parseDmSetupModal(customId: string): { userId: string; } | null 
   return { userId };
 }
 
+export function parseGroupSetupModal(customId: string): { channelId: string; userId: string; } | null {
+  if (!customId.startsWith(`${GROUP_SETUP_MODAL_PREFIX}:`)) return null;
+  const [, channelId, userId] = customId.split(":", 3);
+  if (!channelId || !userId) return null;
+  return { channelId, userId };
+}
+
 function canManageGuildInstallation(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): boolean {
   if (!interaction.inGuild()) return false;
   if (interaction.guild?.ownerId === interaction.user.id) return true;
   return interaction.memberPermissions?.has("Administrator") ?? false;
+}
+
+function canManageGroupInstallation(channelId: string, userId: string, state: BridgeState): boolean {
+  return state.groupInstallations[channelId]?.installedByUserId === userId;
 }
 
 function formatOwnerStatus(state: BridgeState, config: BridgeConfig): string {
@@ -373,11 +415,21 @@ function formatGuildInstallationStatus(state: BridgeState, guildId: string): str
   return `Enabled in ${installation.allowedChannelIds.map(channelId => `<#${channelId}>`).join(", ")}.`;
 }
 
+function formatGroupInstallationStatus(state: BridgeState, channelId: string): string {
+  const installation = state.groupInstallations[channelId];
+  if (!installation) return "This group chat is not set up yet.";
+  return "This group chat is enabled.";
+}
+
 function formatTenantStatus(state: BridgeState, tenant: TenantReference, config: BridgeConfig): string {
   if (tenant.kind === "owner") return formatOwnerStatus(state, config);
   if (tenant.kind === "user") {
     const user = state.users[tenant.id];
     return user?.encryptedPokeApiKey ? `Linked to <@${tenant.id}>.` : `Not linked yet for <@${tenant.id}>.`;
+  }
+
+  if (tenant.kind === "group") {
+    return formatGroupInstallationStatus(state, tenant.id);
   }
 
   const installation = state.guildInstallations[tenant.id];
@@ -388,7 +440,28 @@ function formatTenantStatus(state: BridgeState, tenant: TenantReference, config:
 function getTenantSecretState(state: BridgeState, tenant: TenantReference) {
   if (tenant.kind === "owner") return state.owner;
   if (tenant.kind === "user") return state.users[tenant.id] ?? null;
+  if (tenant.kind === "group") return state.groupInstallations[tenant.id] ?? null;
   return state.guildInstallations[tenant.id] ?? null;
+}
+
+async function resolveActiveGroupInstallation(
+  messageOrInteractionChannel: Message["channel"] | ChatInputCommandInteraction["channel"] | null | undefined,
+  state: BridgeState,
+  updateState: (next: BridgeState) => Promise<void>,
+  channelId: string
+): Promise<GroupInstallationState | null> {
+  const installation = state.groupInstallations[channelId];
+  if (!installation) return null;
+
+  const recipientIds = getGroupRecipientIds(messageOrInteractionChannel);
+  if (recipientIds && !recipientIds.has(installation.installedByUserId)) {
+    const nextState = removeGroupInstallation(state, channelId);
+    Object.assign(state, nextState);
+    await updateState(state);
+    return null;
+  }
+
+  return installation;
 }
 
 export function buildSetupLinkedMessage(state: BridgeState, tenant: TenantReference, config: BridgeConfig): string {
@@ -410,6 +483,10 @@ function setTenantSecretState(state: BridgeState, tenant: TenantReference, encry
     return setUserLink(state, discordUserId, dmChannelId, encryptedPokeApiKey);
   }
 
+  if (tenant.kind === "group") {
+    return setGroupKey(state, tenant.id, discordUserId, encryptedPokeApiKey);
+  }
+
   const nextState = setGuildKey(state, tenant.id, discordUserId, encryptedPokeApiKey);
   return installGuildChannel(nextState, tenant.id, discordUserId, dmChannelId, encryptedPokeApiKey);
 }
@@ -423,8 +500,13 @@ async function buildDiscordRequestFromMessage(
   promptContent = message.content
 ): Promise<DiscordRelayRequest> {
   const attachments = getMessageAttachments(message);
-  const contextMessages = message.guildId == null ? [] : await collectChannelContext(message.channel, config.contextMessageCount);
-  const replyTarget = buildReplyTarget(message.channelId, isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel), isDmMessage(message) ? "dm" : "guild");
+  const isGroup = isGroupDmMessage(message);
+  const contextMessages = message.guildId != null || isGroup ? await collectChannelContext(message.channel, config.contextMessageCount) : [];
+  const replyTarget = buildReplyTarget(
+    message.channelId,
+    isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel),
+    isGroup ? "group" : isDmMessage(message) ? "dm" : "guild"
+  );
 
   return {
     bridgeRequestId: randomUUID(),
@@ -432,7 +514,7 @@ async function buildDiscordRequestFromMessage(
     discordUserId: message.author.id,
     discordChannelId: message.channelId,
     discordMessageId: message.id,
-    mode: isDmMessage(message) ? "dm" : "guild",
+    mode: isGroup ? "group" : isDmMessage(message) ? "dm" : "guild",
     prompt: promptContent,
     replyTarget,
     attachments,
@@ -454,8 +536,13 @@ async function buildDiscordRequestFromInteraction(
   voiceManager: VoiceManager
 ): Promise<DiscordRelayRequest> {
   const attachments = getCommandAttachments(interaction);
-  const contextMessages = interaction.inGuild() ? await collectChannelContext(interaction.channel, config.contextMessageCount) : [];
-  const replyTarget = buildReplyTarget(interaction.channelId, getChannelLabel(interaction.channel) ?? (interaction.inGuild() ? "Server channel" : "Direct message"), interaction.inGuild() ? "guild" : "dm");
+  const isGroup = isGroupDmInteraction(interaction);
+  const contextMessages = interaction.inGuild() || isGroup ? await collectChannelContext(interaction.channel, config.contextMessageCount) : [];
+  const replyTarget = buildReplyTarget(
+    interaction.channelId,
+    getChannelLabel(interaction.channel) ?? (interaction.inGuild() ? "Server channel" : isGroup ? "Group chat" : "Direct message"),
+    interaction.inGuild() ? "guild" : isGroup ? "group" : "dm"
+  );
 
   return {
     bridgeRequestId: randomUUID(),
@@ -463,7 +550,7 @@ async function buildDiscordRequestFromInteraction(
     discordUserId: interaction.user.id,
     discordChannelId: interaction.channelId,
     discordMessageId: interaction.id,
-    mode: interaction.inGuild() ? "guild" : "dm",
+    mode: interaction.inGuild() ? "guild" : isGroup ? "group" : "dm",
     prompt: interaction.options.getString("message", true),
     replyTarget,
     attachments,
@@ -512,6 +599,29 @@ async function handleDmMessage(message: Message, config: BridgeConfig, state: Br
 
   if (!tenantSecret?.encryptedPokeApiKey) {
     await sendTextMessage(message.channel, "Use /poke setup in this DM to link this account.");
+    return;
+  }
+
+  if (state.recentMessageIds.includes(message.id)) return;
+  Object.assign(state, rememberMessageId(state, message.id));
+  await updateState(state);
+
+  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, voiceManager, message.content);
+  request.prompt = buildDiscordRelayPrompt(request);
+  await onRelayRequest(request);
+}
+
+async function handleGroupMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>, botUserId: string, voiceManager: VoiceManager): Promise<void> {
+  if (!isGroupDmMessage(message)) return;
+
+  const tenant = getTenantForGroup(message.channelId);
+  const installation = await resolveActiveGroupInstallation(message.channel, state, updateState, message.channelId);
+  const tenantSecret = getTenantSecretState(state, tenant);
+  const repliedToBot = await isReplyToBotMessage(message, botUserId);
+  if (!repliedToBot) return;
+
+  if (!installation?.encryptedPokeApiKey || !tenantSecret?.encryptedPokeApiKey) {
+    await sendTextMessage(message.channel, "This group chat is not set up yet. Someone should run /poke setup.");
     return;
   }
 
@@ -576,7 +686,7 @@ function createSlashCommand() {
       .addAttachmentOption(option => option.setName("attachment5").setDescription("Optional attachment 5.").setRequired(false)))
     .addSubcommand(subcommand => subcommand
       .setName("setup")
-      .setDescription("Enable Poke in this server channel.")
+      .setDescription("Enable Poke in this server channel, group chat, or DM.")
       .addChannelOption(option => option
         .setName("channel")
         .setDescription("Channel to enable. Defaults to the current channel.")
@@ -587,9 +697,12 @@ function createSlashCommand() {
       .setDescription("Show the current bridge status."))
     .addSubcommand(subcommand => subcommand
       .setName("reset")
-      .setDescription("Reset the current bridge link or server installation."));
+      .setDescription("Reset the current bridge link, server installation, or group chat install."));
 
-  return command.setContexts([InteractionContextType.Guild, InteractionContextType.BotDM]).setIntegrationTypes([ApplicationIntegrationType.GuildInstall]).setDMPermission(true);
+  return command
+    .setContexts([InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel])
+    .setIntegrationTypes([ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall])
+    .setDMPermission(true);
 }
 
 export async function startDiscordBot(
@@ -608,6 +721,13 @@ export async function startDiscordBot(
     if (message.author.bot) return;
 
     try {
+      if (isGroupDmMessage(message)) {
+        const botUserId = client.user?.id;
+        if (!botUserId) return;
+        await handleGroupMessage(message, config, state, updateState, onRelayRequest, botUserId, voiceManager);
+        return;
+      }
+
       if (message.guildId == null) {
         await handleDmMessage(message, config, state, updateState, onRelayRequest, voiceManager);
         return;
@@ -657,6 +777,31 @@ export async function startDiscordBot(
           return;
         }
 
+        const groupParsed = parseGroupSetupModal(interaction.customId);
+        if (groupParsed) {
+          if (!isGroupDmInteraction(interaction)) {
+            await interaction.reply({ content: "Use /poke setup in a group chat.", ephemeral: true });
+            return;
+          }
+          if (interaction.channelId !== groupParsed.channelId || interaction.user.id !== groupParsed.userId) {
+            await interaction.reply({ content: "This setup session no longer matches.", ephemeral: true });
+            return;
+          }
+
+          const apiKey = interaction.fields.getTextInputValue("apiKey").trim();
+          if (!isLikelyPokeApiKey(apiKey)) {
+            await interaction.reply({ content: "That does not look like a valid Poke API key.", ephemeral: true });
+            return;
+          }
+
+          const encrypted = encryptTenantSecret(apiKey, config.stateSecret);
+          const nextState = setGroupKey(state, interaction.channelId, interaction.user.id, encrypted);
+          Object.assign(state, nextState);
+          await updateState(state);
+          await interaction.reply({ content: "Poke is now enabled in this group chat.", ephemeral: false });
+          return;
+        }
+
         const parsed = parseGuildSetupModal(interaction.customId);
         if (!parsed) return;
         if (!interaction.inGuild()) {
@@ -689,7 +834,15 @@ export async function startDiscordBot(
       if (!interaction.isChatInputCommand() || interaction.commandName !== COMMAND_NAME) return;
 
       const subcommand = interaction.options.getSubcommand();
-      const tenant = interaction.inGuild() ? getTenantForGuild(interaction.guildId) : getTenantForDm(config, interaction.user.id);
+      const tenant = interaction.inGuild()
+        ? getTenantForGuild(interaction.guildId)
+        : isGroupDmInteraction(interaction)
+          ? getTenantForGroup(interaction.channelId)
+          : getTenantForDm(config, interaction.user.id);
+
+      if (tenant.kind === "group" && isGroupDmInteraction(interaction)) {
+        await resolveActiveGroupInstallation(interaction.channel, state, updateState, interaction.channelId);
+      }
 
       if (subcommand === "setup") {
         if (isTenantLinked(state, tenant)) {
@@ -697,10 +850,22 @@ export async function startDiscordBot(
           return;
         }
 
-        if (!interaction.inGuild()) {
+        if (tenant.kind === "user" || tenant.kind === "owner") {
           await interaction.showModal(buildDmSetupModal(interaction.user.id));
           return;
         }
+
+        if (tenant.kind === "group") {
+          const channelId = interaction.channelId;
+          if (!channelId) {
+            await interaction.reply({ content: "Could not determine the group chat channel for setup.", ephemeral: true });
+            return;
+          }
+
+          await interaction.showModal(buildGroupSetupModal(channelId, interaction.user.id));
+          return;
+        }
+
         if (!canManageGuildInstallation(interaction)) {
           await interaction.reply({ content: "Only the server owner or an administrator can set this up.", ephemeral: true });
           return;
@@ -708,7 +873,18 @@ export async function startDiscordBot(
 
         const channel = interaction.options.getChannel("channel");
         const targetChannelId = channel && typeof channel === "object" && "id" in channel ? channel.id : interaction.channelId;
-        await interaction.showModal(buildGuildSetupModal(interaction.guildId, targetChannelId, interaction.user.id));
+        if (!targetChannelId) {
+          await interaction.reply({ content: "Could not determine the server channel for setup.", ephemeral: true });
+          return;
+        }
+
+        const guildId = interaction.guildId;
+        if (!guildId) {
+          await interaction.reply({ content: "Could not determine the server for setup.", ephemeral: true });
+          return;
+        }
+
+        await interaction.showModal(buildGuildSetupModal(guildId, targetChannelId, interaction.user.id));
         return;
       }
 
@@ -729,6 +905,22 @@ export async function startDiscordBot(
           Object.assign(state, clearUserLink(state, interaction.user.id));
           await updateState(state);
           await respond(interaction, "User link cleared.");
+          return;
+        }
+
+        if (tenant.kind === "group") {
+          if (!isGroupDmInteraction(interaction)) {
+            await respond(interaction, "Use /poke reset in the group chat.");
+            return;
+          }
+          if (!canManageGroupInstallation(interaction.channelId, interaction.user.id, state)) {
+            await respond(interaction, "Only the person who set up this group chat can reset it.");
+            return;
+          }
+
+          Object.assign(state, removeGroupInstallation(state, interaction.channelId));
+          await updateState(state);
+          await respond(interaction, "Group chat installation removed.");
           return;
         }
 
@@ -755,9 +947,19 @@ export async function startDiscordBot(
         return;
       }
 
+      if (tenant.kind === "group") {
+        const activeInstallation = await resolveActiveGroupInstallation(interaction.channel, state, updateState, interaction.channelId);
+        if (!activeInstallation?.encryptedPokeApiKey) {
+          await respond(interaction, "This group chat is not set up yet. Someone should run /poke setup.");
+          return;
+        }
+      }
+
       if (!tenantSecret?.encryptedPokeApiKey) {
         await respond(interaction, tenant.kind === "guild"
           ? "This server is not set up yet. An administrator should run /poke setup."
+          : tenant.kind === "group"
+            ? "This group chat is not set up yet. Someone should run /poke setup."
           : "Paste your Poke API key in this DM to link this account.");
         return;
       }

@@ -9,6 +9,13 @@ const GUILD_PREFACE = [
   "If the user asks for music or voice playback, use Spotify-first discovery when they only name an artist or give a vague request, and pass queueVoiceTrack an artist plus optional query. If you already have a concrete playable link, pass url instead. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found."
 ].join(" ");
 
+const GROUP_PREFACE = [
+  "You're chatting in a shared group chat.",
+  "Keep the tone natural and helpful, but treat the conversation as shared rather than private.",
+  "Do not reveal who installed or linked the chat, or any private account or operator details.",
+  "If a request heads toward personal identity or linkage details, steer back to something useful and general."
+].join(" ");
+
 const DM_PREFACE = [
   "This is a direct message.",
   "Keep the same natural voice, and feel free to help with private setup and personal-use details while still avoiding revealing anything about other people."
@@ -70,7 +77,11 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       `Discord user id: ${request.discordUserId}`,
       `Discord channel id: ${request.discordChannelId}`,
       `Message id: ${request.discordMessageId}`,
-      request.mode === "guild" ? "Treat guild conversations as server-scoped and follow the server's configured channels." : null,
+      request.mode === "guild"
+        ? "Treat guild conversations as server-scoped and follow the server's configured channels."
+        : request.mode === "group"
+          ? "Treat group conversations as shared chat-scoped and keep installation or operator details private."
+          : null,
       "",
       "User message:",
       request.prompt.trim(),
@@ -89,9 +100,15 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       "When you want to edit a message the bridge already sent, call editDiscordMessage with the message id and new content or embeds.",
       "When you want to delete a message the bridge already sent, call deleteDiscordMessage with the message id.",
       "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id.",
-      "When you want to join or control voice playback, use queueVoiceTrack for either a concrete playable url or an artist-bound music request with artist and optional query. Use queueVoiceTrack with position=front when the user wants play next. Use controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, clear, volume, seek, shuffle, loop, and move.",
-      "For controlVoicePlayback action=volume, you must always send value as an explicit integer from 0 to 150. If the user says louder or quieter without a number, choose a sensible concrete integer and send it.",
-      "Examples: set volume to 50 => action=volume value=50. Jump to 90 seconds => action=seek positionMs=90000. Loop the queue => action=loop loopMode=queue."
+      request.mode === "guild"
+        ? "When you want to join or control voice playback, use queueVoiceTrack for either a concrete playable url or an artist-bound music request with artist and optional query. Use queueVoiceTrack with position=front when the user wants play next. Use controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, clear, volume, seek, shuffle, loop, and move."
+        : null,
+      request.mode === "guild"
+        ? "For controlVoicePlayback action=volume, you must always send value as an explicit integer from 0 to 150. If the user says louder or quieter without a number, choose a sensible concrete integer and send it."
+        : null,
+      request.mode === "guild"
+        ? "Examples: set volume to 50 => action=volume value=50. Jump to 90 seconds => action=seek positionMs=90000. Loop the queue => action=loop loopMode=queue."
+        : null
     );
   } else {
     lines.push("", "Use the same direct style, but keep responses grounded and safe.");
@@ -108,7 +125,11 @@ export function buildDmPrompt(): string {
   return buildPromptWithPreface(DM_PREFACE);
 }
 
+export function buildGroupPrompt(): string {
+  return buildPromptWithPreface(GROUP_PREFACE);
+}
+
 export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
-  const preface = request.mode === "guild" ? GUILD_PREFACE : DM_PREFACE;
+  const preface = request.mode === "guild" ? GUILD_PREFACE : request.mode === "group" ? GROUP_PREFACE : DM_PREFACE;
   return buildPromptWithPreface(preface, request);
 }
