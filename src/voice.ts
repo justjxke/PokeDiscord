@@ -566,13 +566,13 @@ export async function handleTrackCompletion(
     return;
   }
 
-  if (reason === "finished" && finishedTrack) {
-    if (session.loopMode === "track") {
-      await replayLoopedTrack(session, finishedTrack, "track completion");
-      return;
-    } else if (session.loopMode === "queue") {
-      session.queue.push(finishedTrack);
-    }
+  if (finishedTrack && session.loopMode === "track" && reason !== "stopped") {
+    await replayLoopedTrack(session, finishedTrack, "track completion");
+    return;
+  }
+
+  if (reason === "finished" && finishedTrack && session.loopMode === "queue") {
+    session.queue.push(finishedTrack);
   }
 
   if (reason === "stopped" || reason === "finished" || reason === "replaced" || reason === "cleanup") {
