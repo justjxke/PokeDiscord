@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   clampSeekPosition,
+  shouldAnnounceQueueEnded,
   isStaleTrackEvent,
   moveVoiceQueueItem,
   normalizeVolume,
@@ -175,5 +176,14 @@ describe("shouldAnnounceIdleLeave", () => {
 
   test("announces once a session has played at least one track", () => {
     expect(shouldAnnounceIdleLeave(true)).toBe(true);
+  });
+});
+
+describe("shouldAnnounceQueueEnded", () => {
+  test("announces only for a real finished track after playback has started", () => {
+    expect(shouldAnnounceQueueEnded("finished", true)).toBe(true);
+    expect(shouldAnnounceQueueEnded("finished", false)).toBe(false);
+    expect(shouldAnnounceQueueEnded("replaced", true)).toBe(false);
+    expect(shouldAnnounceQueueEnded("stopped", true)).toBe(false);
   });
 });

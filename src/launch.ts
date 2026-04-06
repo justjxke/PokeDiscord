@@ -11,6 +11,7 @@ import { sendToPoke } from "./pokeClient";
 import { createRuntimeStore } from "./runtimeStore";
 import { loadState } from "./state";
 import type { DiscordRelayRequest, DiscordSentMessageRecord } from "./types";
+import { buildControlVoicePlaybackRequest, buildQueueVoiceTrackRequest } from "./voiceRequests";
 import { spawnWorker, type WorkerClient } from "./workerClient";
 
 const LAVALINK_PORT = 2334;
@@ -278,20 +279,7 @@ async function main(): Promise<void> {
         throw new Error("Voice playback is only available in guilds.");
       }
 
-      return currentWorker.request("queueVoiceTrack", {
-        bridgeRequestId: meta.bridgeRequestId,
-        guildId: request.tenant.id,
-        requesterId: request.discordUserId,
-        requesterUsername: request.voiceContext?.requester.username ?? request.discordUserId,
-        requesterDisplayName: request.voiceContext?.requester.displayName ?? request.discordUserId,
-        requesterVoiceChannelId: request.voiceContext?.requester.voiceChannel.id ?? "",
-        requesterVoiceChannelName: request.voiceContext?.requester.voiceChannel.name ?? null,
-        textChannelId: request.replyTarget.channelId,
-        url: meta.url,
-        artist: meta.artist,
-        query: meta.query,
-        position: meta.position
-      });
+      return currentWorker.request("queueVoiceTrack", buildQueueVoiceTrackRequest(request, meta));
     },
     onControlVoicePlayback: async meta => {
       const currentWorker = worker;
@@ -301,18 +289,7 @@ async function main(): Promise<void> {
         throw new Error("Voice playback is only available in guilds.");
       }
 
-      return currentWorker.request("controlVoicePlayback", {
-        bridgeRequestId: meta.bridgeRequestId,
-        guildId: request.tenant.id,
-        requesterId: request.discordUserId,
-        requesterUsername: request.voiceContext?.requester.username ?? request.discordUserId,
-        requesterDisplayName: request.voiceContext?.requester.displayName ?? request.discordUserId,
-        requesterVoiceChannelId: request.voiceContext?.requester.voiceChannel.id ?? null,
-        requesterVoiceChannelName: request.voiceContext?.requester.voiceChannel.name ?? null,
-        textChannelId: request.replyTarget.channelId,
-        action: meta.action,
-        index: meta.index
-      });
+      return currentWorker.request("controlVoicePlayback", buildControlVoicePlaybackRequest(request, meta));
     }
   });
 

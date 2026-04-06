@@ -859,7 +859,59 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                   description: "Required for the move action. 1-based queue index to move to."
                 }
               },
-              required: ["bridgeRequestId", "action"]
+              required: ["bridgeRequestId", "action"],
+              allOf: [
+                {
+                  if: {
+                    properties: {
+                      action: { const: "volume" }
+                    }
+                  },
+                  then: {
+                    required: ["value"]
+                  }
+                },
+                {
+                  if: {
+                    properties: {
+                      action: { const: "seek" }
+                    }
+                  },
+                  then: {
+                    required: ["positionMs"]
+                  }
+                },
+                {
+                  if: {
+                    properties: {
+                      action: { const: "loop" }
+                    }
+                  },
+                  then: {
+                    required: ["loopMode"]
+                  }
+                },
+                {
+                  if: {
+                    properties: {
+                      action: { const: "move" }
+                    }
+                  },
+                  then: {
+                    required: ["fromIndex", "toIndex"]
+                  }
+                },
+                {
+                  if: {
+                    properties: {
+                      action: { const: "remove" }
+                    }
+                  },
+                  then: {
+                    required: ["index"]
+                  }
+                }
+              ]
             }
           }
         ]

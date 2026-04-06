@@ -217,25 +217,18 @@ export function shouldAnnounceIdleLeave(hasStartedPlayback: boolean): boolean {
   return hasStartedPlayback;
 }
 
+export function shouldAnnounceQueueEnded(reason: string, hasStartedPlayback: boolean): boolean {
+  return reason === "finished" && shouldAnnounceIdleLeave(hasStartedPlayback);
+}
+
 function scheduleIdleLeave(
   sessions: Map<string, VoiceSession>,
-  session: VoiceSession,
-  announce: (channelId: string, content: string) => Promise<void>
+  session: VoiceSession
 ): void {
   if (session.destroyed || session.idleLeaveAt != null) return;
 
   session.idleLeaveAt = Date.now() + IDLE_LEAVE_DELAY_MS;
   const leaveAt = session.idleLeaveAt;
-
-  if (session.textChannelId && shouldAnnounceIdleLeave(session.hasStartedPlayback)) {
-    void (async () => {
-      try {
-        await announce(session.textChannelId as string, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
-      } catch {
-        // Best effort only.
-      }
-    })();
-  }
 
   session.idleLeaveTimer = setTimeout(() => {
     void (async () => {
@@ -554,7 +547,7 @@ async function handleTrackCompletion(
 
   if (finishedTrack == null) {
     if (!session.queue.length) {
-      scheduleIdleLeave(sessions, session, announce);
+      scheduleIdleLeave(sessions, session);
     }
     return;
   }
@@ -581,7 +574,14 @@ async function handleTrackCompletion(
       await advanceQueue(sessions, session, announce);
       return;
     }
-    scheduleIdleLeave(sessions, session, announce);
+    if (session.textChannelId && shouldAnnounceQueueEnded(reason, session.hasStartedPlayback)) {
+      try {
+        await announce(session.textChannelId, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
+      } catch {
+        // Best effort only.
+      }
+    }
+    scheduleIdleLeave(sessions, session);
     return;
   }
 
@@ -590,7 +590,7 @@ async function handleTrackCompletion(
     return;
   }
 
-  scheduleIdleLeave(sessions, session, announce);
+  scheduleIdleLeave(sessions, session);
 }
 
 async function handleTrackFailure(
@@ -632,7 +632,7 @@ async function handleTrackFailure(
     return;
   }
 
-  scheduleIdleLeave(sessions, session, announce);
+  scheduleIdleLeave(sessions, session);
 }
 
 async function advanceQueue(
@@ -644,7 +644,7 @@ async function advanceQueue(
 
   const nextTrack = session.queue.shift() ?? null;
   if (!nextTrack) {
-    scheduleIdleLeave(sessions, session, announce);
+    scheduleIdleLeave(sessions, session);
     return;
   }
 
@@ -670,7 +670,7 @@ async function advanceQueue(
       return;
     }
 
-    scheduleIdleLeave(sessions, session, announce);
+    scheduleIdleLeave(sessions, session);
   }
 }
 
