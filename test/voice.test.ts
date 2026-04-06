@@ -245,4 +245,60 @@ describe("handleTrackCompletion", () => {
     expect(session.currentTrack?.encoded).toBe("encoded-next");
     expect(session.queue).toHaveLength(0);
   });
+
+  test("restarts the current track from the beginning when loop mode is track", async () => {
+    const playedTracks: Array<{ track: { encoded: string }; position?: number }> = [];
+    const session = {
+      destroyed: false,
+      guildId: "guild-1",
+      voiceChannelId: "voice-1",
+      voiceChannelName: "Music",
+      textChannelId: null,
+      queue: [
+        {
+          id: "voice-track-next",
+          title: "Next Track",
+          url: "https://www.youtube.com/watch?v=next",
+          encoded: "encoded-next",
+          sourceUrl: "ytsearch:next",
+          lengthMs: 1000,
+          isSeekable: true,
+          fallbackTracks: [],
+          requestedByUserId: "user-1",
+          requestedByName: "Jake",
+          requestedAt: "2026-04-05T16:00:00.000Z"
+        }
+      ],
+      currentTrack: {
+        id: "voice-track-current",
+        title: "Current Track",
+        url: "https://www.youtube.com/watch?v=current",
+        encoded: "encoded-current",
+        sourceUrl: "ytsearch:current",
+        lengthMs: 1000,
+        isSeekable: true,
+        fallbackTracks: [],
+        requestedByUserId: "user-1",
+        requestedByName: "Jake",
+        requestedAt: "2026-04-05T16:00:00.000Z"
+      },
+      hasStartedPlayback: true,
+      loopMode: "track" as const,
+      idleLeaveAt: null,
+      idleLeaveTimer: null,
+      player: {
+        paused: false,
+        volume: 100,
+        playTrack: async (payload: { track: { encoded: string }; position?: number }) => {
+          playedTracks.push(payload);
+        }
+      }
+    };
+
+    await handleTrackCompletion(new Map([["guild-1", session as never]]), session as never, async () => {}, "finished", "encoded-current");
+
+    expect(playedTracks).toEqual([{ track: { encoded: "encoded-current" }, position: 0 }]);
+    expect(session.currentTrack?.encoded).toBe("encoded-current");
+    expect(session.queue).toHaveLength(1);
+  });
 });

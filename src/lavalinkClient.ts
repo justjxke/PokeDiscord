@@ -238,8 +238,12 @@ export class LavalinkPlayer extends EventEmitter {
     this.triggerVoiceSync("setServerUpdate");
   }
 
-  public async playTrack(playerOptions: { track: { encoded: string } }, noReplace = false): Promise<void> {
-    await this.update({ track: playerOptions.track, paused: false }, noReplace);
+  public async playTrack(playerOptions: { track: { encoded: string }; position?: number }, noReplace = false): Promise<void> {
+    await this.update({
+      track: playerOptions.track,
+      paused: false,
+      position: typeof playerOptions.position === "number" ? playerOptions.position : 0
+    }, noReplace);
   }
 
   public async stopTrack(): Promise<void> {

@@ -558,7 +558,7 @@ export async function handleTrackCompletion(
       clearIdleTimer(session);
 
       try {
-        await session.player.playTrack({ track: { encoded: finishedTrack.encoded } });
+        await session.player.playTrack({ track: { encoded: finishedTrack.encoded }, position: 0 });
         return;
       } catch (error) {
         console.error(`[poke-discord-bridge] Failed to replay looped track in guild ${session.guildId}:`, error);
