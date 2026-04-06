@@ -532,7 +532,7 @@ async function destroySession(sessions: Map<string, VoiceSession>, guildId: stri
   sessions.delete(guildId);
 }
 
-async function handleTrackCompletion(
+export async function handleTrackCompletion(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
@@ -935,7 +935,15 @@ async function controlVoicePlaybackImpl(
       if (!session.currentTrack) {
         return { ok: true, action: "skip", message: "Nothing is playing.", session: queueSnapshot(session) };
       }
+      // Don't rely on Lavalink's end event for the user-facing state transition.
       await session.player.stopTrack();
+      await handleTrackCompletion(
+        sessions,
+        session,
+        announce,
+        "stopped",
+        session.currentTrack.encoded
+      );
       return { ok: true, action: "skip", message: "Skipped the current track.", session: queueSnapshot(session) };
     case "stop":
     case "leave":

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   clampSeekPosition,
+  handleTrackCompletion,
   shouldAnnounceQueueEnded,
   isStaleTrackEvent,
   moveVoiceQueueItem,
@@ -185,5 +186,63 @@ describe("shouldAnnounceQueueEnded", () => {
     expect(shouldAnnounceQueueEnded("finished", false)).toBe(false);
     expect(shouldAnnounceQueueEnded("replaced", true)).toBe(false);
     expect(shouldAnnounceQueueEnded("stopped", true)).toBe(false);
+  });
+});
+
+describe("handleTrackCompletion", () => {
+  test("advances to the next queued track when skip stops the current track", async () => {
+    const playedTracks: string[] = [];
+    const session = {
+      destroyed: false,
+      guildId: "guild-1",
+      voiceChannelId: "voice-1",
+      voiceChannelName: "Music",
+      textChannelId: null,
+      queue: [
+        {
+          id: "voice-track-next",
+          title: "Next Track",
+          url: "https://www.youtube.com/watch?v=next",
+          encoded: "encoded-next",
+          sourceUrl: "ytsearch:next",
+          lengthMs: 1000,
+          isSeekable: true,
+          fallbackTracks: [],
+          requestedByUserId: "user-1",
+          requestedByName: "Jake",
+          requestedAt: "2026-04-05T16:00:00.000Z"
+        }
+      ],
+      currentTrack: {
+        id: "voice-track-current",
+        title: "Current Track",
+        url: "https://www.youtube.com/watch?v=current",
+        encoded: "encoded-current",
+        sourceUrl: "ytsearch:current",
+        lengthMs: 1000,
+        isSeekable: true,
+        fallbackTracks: [],
+        requestedByUserId: "user-1",
+        requestedByName: "Jake",
+        requestedAt: "2026-04-05T16:00:00.000Z"
+      },
+      hasStartedPlayback: true,
+      loopMode: "off" as const,
+      idleLeaveAt: null,
+      idleLeaveTimer: null,
+      player: {
+        paused: false,
+        volume: 100,
+        playTrack: async ({ track }: { track: { encoded: string } }) => {
+          playedTracks.push(track.encoded);
+        }
+      }
+    };
+
+    await handleTrackCompletion(new Map([["guild-1", session as never]]), session as never, async () => {}, "stopped", "encoded-current");
+
+    expect(playedTracks).toEqual(["encoded-next"]);
+    expect(session.currentTrack?.encoded).toBe("encoded-next");
+    expect(session.queue).toHaveLength(0);
   });
 });
