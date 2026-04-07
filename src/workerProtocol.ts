@@ -15,6 +15,7 @@ export type WorkerCommandName =
   | "getChannelHistory"
   | "queueVoiceTrack"
   | "controlVoicePlayback"
+  | "stopTypingIndicator"
   | "relayRequest";
 
 export interface WorkerRequestPayloadMap {
@@ -46,6 +47,9 @@ export interface WorkerRequestPayloadMap {
   };
   queueVoiceTrack: QueueVoiceTrackInput;
   controlVoicePlayback: ControlVoicePlaybackInput;
+  stopTypingIndicator: {
+    bridgeRequestId: string;
+  };
   relayRequest: {
     request: DiscordRelayRequest;
   };
@@ -59,6 +63,7 @@ export interface WorkerResponsePayloadMap {
   getChannelHistory: DiscordChannelHistoryMessage[];
   queueVoiceTrack: VoiceOperationResult;
   controlVoicePlayback: VoiceOperationResult;
+  stopTypingIndicator: null;
   relayRequest: PokeSendResult;
 }
 

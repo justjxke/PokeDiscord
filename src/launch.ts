@@ -235,6 +235,9 @@ async function main(): Promise<void> {
       });
       if (meta?.bridgeRequestId) {
         runtimeStore.saveSentMessages(meta.bridgeRequestId, channelId, messageIds);
+        await currentWorker.request("stopTypingIndicator", {
+          bridgeRequestId: meta.bridgeRequestId
+        });
       }
       return messageIds;
     },

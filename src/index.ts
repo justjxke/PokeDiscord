@@ -150,6 +150,16 @@ async function main(): Promise<void> {
           respond(request, await voiceManager.controlVoicePlayback(payload));
           return;
         }
+        case "stopTypingIndicator": {
+          const payload = (request as WorkerRequestMessage<"stopTypingIndicator">).payload;
+          const stopTyping = typingStops.get(payload.bridgeRequestId);
+          if (stopTyping) {
+            typingStops.delete(payload.bridgeRequestId);
+            await stopTyping();
+          }
+          respond(request, null);
+          return;
+        }
         default:
           respondError(request, new Error(`Unsupported supervisor request: ${request.method}`));
       }
@@ -157,6 +167,8 @@ async function main(): Promise<void> {
       respondError(request, error);
     }
   };
+
+  const typingStops = new Map<string, () => Promise<void>>();
 
   const parser = createWorkerMessageParser(message => {
     if (message.kind === "request") {
@@ -186,17 +198,26 @@ async function main(): Promise<void> {
   process.stdin.on("data", chunk => parser(chunk.toString()));
 
   const runtime = await startDiscordBot(config, state, async next => persistState(next), async request => {
-    let stopTyping: (() => Promise<void>) | null = null;
-    try {
-      stopTyping = await startDeferredTypingIndicator(discordClient!, request.replyTarget.channelId);
-    } catch {
-      stopTyping = null;
+    if (!typingStops.has(request.bridgeRequestId)) {
+      try {
+        typingStops.set(
+          request.bridgeRequestId,
+          await startDeferredTypingIndicator(discordClient!, request.replyTarget.channelId)
+        );
+      } catch {
+        // Ignore typing failures; they are best-effort only.
+      }
     }
 
     try {
       return await sendRequestToSupervisor("relayRequest", { request });
-    } finally {
-      await stopTyping?.();
+    } catch (error) {
+      const stopTyping = typingStops.get(request.bridgeRequestId);
+      if (stopTyping) {
+        typingStops.delete(request.bridgeRequestId);
+        await stopTyping();
+      }
+      throw error;
     }
   });
 
