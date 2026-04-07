@@ -8,8 +8,8 @@ import {
   getDiscordChannelHistory,
   sendDiscordMessage,
   sendDiscordReaction,
-  startDiscordBot,
-  startTypingIndicator
+  startDeferredTypingIndicator,
+  startDiscordBot
 } from "./discordBot";
 import { loadConfig } from "./config";
 import { loadState, saveState, type BridgeState } from "./state";
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
   const runtime = await startDiscordBot(config, state, async next => persistState(next), async request => {
     let stopTyping: (() => Promise<void>) | null = null;
     try {
-      stopTyping = await startTypingIndicator(discordClient!, request.replyTarget.channelId);
+      stopTyping = await startDeferredTypingIndicator(discordClient!, request.replyTarget.channelId);
     } catch {
       stopTyping = null;
     }

@@ -864,3 +864,36 @@ export async function startTypingIndicator(client: Client, channelId: string): P
     clearInterval(interval);
   };
 }
+
+export async function startDeferredTypingIndicator(
+  client: Client,
+  channelId: string,
+  delayMs = 200,
+  startIndicator: (client: Client, channelId: string) => Promise<() => Promise<void>> = startTypingIndicator
+): Promise<() => Promise<void>> {
+  let stopped = false;
+  let stopTyping: (() => Promise<void>) | null = null;
+  let startPromise: Promise<void> | null = null;
+
+  const timer = setTimeout(() => {
+    if (stopped) return;
+
+    startPromise = (async () => {
+      try {
+        stopTyping = await startIndicator(client, channelId);
+        if (stopped) {
+          await stopTyping();
+        }
+      } catch {
+        stopTyping = null;
+      }
+    })();
+  }, delayMs);
+
+  return async () => {
+    stopped = true;
+    clearTimeout(timer);
+    await startPromise;
+    await stopTyping?.();
+  };
+}
