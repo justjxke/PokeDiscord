@@ -9,6 +9,7 @@ import { buildLavalinkConfig } from "./launchConfig";
 import { startMcpServer } from "./mcp";
 import { sendToPoke } from "./pokeClient";
 import { createRuntimeStore } from "./runtimeStore";
+import { resolveReplyChannelId, resolveRequestContext, resolveSentMessageTarget } from "./runtimeTargets";
 import { loadState } from "./state";
 import type { DiscordRelayRequest, DiscordSentMessageRecord } from "./types";
 import { buildControlVoicePlaybackRequest, buildQueueVoiceTrackRequest } from "./voiceRequests";
@@ -125,70 +126,6 @@ async function waitForTcpPort(host: string, port: number, timeoutMs: number): Pr
   throw new Error(`Timed out waiting for ${host}:${port}`);
 }
 
-function resolveRequestContext(
-  store: ReturnType<typeof createRuntimeStore>,
-  bridgeRequestId: string
-): DiscordRelayRequest {
-  const request = store.getRequest(bridgeRequestId);
-  if (!request) {
-    throw new Error("Discord request context not found.");
-  }
-
-  return request;
-}
-
-function resolveReplyChannelId(
-  store: ReturnType<typeof createRuntimeStore>,
-  meta?: { channelId?: string; bridgeRequestId?: string; }
-): string {
-  if (meta?.channelId) {
-    return meta.channelId;
-  }
-
-  if (meta?.bridgeRequestId) {
-    return resolveRequestContext(store, meta.bridgeRequestId).replyTarget.channelId;
-  }
-
-  throw new Error("Discord reply target not found.");
-}
-
-function resolveSentMessageTarget(
-  store: ReturnType<typeof createRuntimeStore>,
-  meta?: { channelId?: string; bridgeRequestId?: string; messageId?: string; }
-): { channelId: string; messageId: string; } {
-  if (meta?.channelId && meta?.messageId) {
-    return {
-      channelId: meta.channelId,
-      messageId: meta.messageId
-    };
-  }
-
-  if (meta?.bridgeRequestId) {
-    const record = store.getSentMessages(meta.bridgeRequestId);
-    if (!record) {
-      throw new Error("Discord message target not found.");
-    }
-
-    if (meta.messageId) {
-      return {
-        channelId: record.channelId,
-        messageId: meta.messageId
-      };
-    }
-
-    if (record.messageIds.length !== 1) {
-      throw new Error("Multiple Discord messages were sent for that request; provide messageId.");
-    }
-
-    return {
-      channelId: record.channelId,
-      messageId: record.messageIds[0] as string
-    };
-  }
-
-  throw new Error("Discord message target not found.");
-}
-
 async function main(): Promise<void> {
   const config = loadConfig();
   const runtimeStore = createRuntimeStore(config.runtimeDbPath);
@@ -221,6 +158,9 @@ async function main(): Promise<void> {
   const mcp = await startMcpServer({
     host: config.mcpHost,
     port: config.mcpPort,
+    allowPublicHealth: config.mcpAllowPublicHealth,
+    rateLimitMaxRequests: config.mcpRateLimitMaxRequests,
+    rateLimitWindowMs: config.mcpRateLimitWindowMs,
     getHealthStatus: loadHealthStatus,
     onSendDiscordMessage: async (content, meta) => {
       const currentWorker = worker;
@@ -235,9 +175,6 @@ async function main(): Promise<void> {
       });
       if (meta?.bridgeRequestId) {
         runtimeStore.saveSentMessages(meta.bridgeRequestId, channelId, messageIds);
-        await currentWorker.request("stopTypingIndicator", {
-          bridgeRequestId: meta.bridgeRequestId
-        });
       }
       return messageIds;
     },
@@ -268,11 +205,6 @@ async function main(): Promise<void> {
         messageId: meta.messageId,
         emoji: meta.emoji
       });
-    },
-    onGetChannelHistory: async meta => {
-      const currentWorker = worker;
-      if (!currentWorker) throw new Error("Discord worker is not ready.");
-      return currentWorker.request("getChannelHistory", meta);
     },
     onQueueVoiceTrack: async meta => {
       const currentWorker = worker;

@@ -1,7 +1,7 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { createDefaultState, normalizeState } from "./bridgePolicy";
+import { assertPersistedStateShape, createDefaultState, normalizeState } from "./bridgePolicy";
 import type { BridgeState } from "./types";
 
 export type { BridgeState } from "./types";
@@ -21,12 +21,23 @@ export async function loadState(path = getStatePath(), stateSecret = ""): Promis
   }
 
   const raw = await readFile(path, "utf8");
+  let parsed: unknown;
 
   try {
-    return normalizeState(JSON.parse(raw), stateSecret);
-  } catch {
-    return createDefaultState();
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse persisted bridge state at ${path}: ${detail}`);
   }
+
+  try {
+    assertPersistedStateShape(parsed);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to normalize persisted bridge state at ${path}: ${detail}`);
+  }
+
+  return normalizeState(parsed, stateSecret);
 }
 
 export async function saveState(state: BridgeState, path = getStatePath()): Promise<void> {
@@ -41,8 +52,4 @@ export function rememberMessageId(state: BridgeState, messageId: string): Bridge
     ...state,
     recentMessageIds: recentMessageIds.slice(0, 100)
   };
-}
-
-export function hasSeenMessageId(state: BridgeState, messageId: string): boolean {
-  return state.recentMessageIds.includes(messageId);
 }

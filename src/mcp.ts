@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import type { DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
+import type { DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
 import type { VoiceOperationResult } from "./voice";
 
 type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear" | "volume" | "seek" | "shuffle" | "loop" | "move";
@@ -20,12 +20,15 @@ type ControlVoicePlaybackRequest = {
 interface StartMcpServerOptions {
   host: string;
   port: number;
+  allowPublicHealth?: boolean;
+  rateLimitWindowMs?: number;
+  rateLimitMaxRequests?: number;
+  trustLocalRequests?: boolean;
   getHealthStatus: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   onSendDiscordMessage: (content: string, meta?: { channelId?: string; bridgeRequestId?: string; replyToMessageId?: string; attachments?: DiscordOutboundAttachment[]; embeds?: DiscordOutboundEmbed[]; }) => Promise<string[]>;
   onEditDiscordMessage: (meta: { content?: string; embeds?: DiscordOutboundEmbed[]; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onReactDiscordMessage: (meta: { emoji: string; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
-  onGetChannelHistory: (meta: { channelId: string; limit: number; }) => Promise<DiscordChannelHistoryMessage[]>;
   onQueueVoiceTrack: (meta: QueueVoiceTrackRequest) => Promise<VoiceOperationResult>;
   onControlVoicePlayback: (meta: ControlVoicePlaybackRequest) => Promise<VoiceOperationResult>;
 }
@@ -57,14 +60,19 @@ const DELETE_TOOL_NAME = "deleteDiscordMessage";
 const DELETE_TOOL_DESCRIPTION = "Delete a specific Discord message the bridge already sent.";
 const REACT_TOOL_NAME = "reactToDiscordMessage";
 const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
-const HISTORY_TOOL_NAME = "getChannelHistory";
-const HISTORY_TOOL_DESCRIPTION = "Get recent messages from a Discord channel.";
 const QUEUE_VOICE_TOOL_NAME = "queueVoiceTrack";
 const QUEUE_VOICE_TOOL_DESCRIPTION = "Queue music in the current guild voice session. Use a concrete playable URL with url, or use artist plus optional query for Spotify-first discovery when the user only names an artist or gives a vague music request. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found.";
 const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
 const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session. For action=volume, always provide value as an explicit integer from 0 to 150.";
 const MAX_BODY_BYTES = 128_000;
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id";
+const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+
+type SessionRegistry = Map<string, number>;
+type RateLimitBucket = {
+  startedAt: number;
+  count: number;
+};
 
 function log(message: string): void {
   process.stdout.write(`[poke-discord-bridge:mcp] ${message}\n`);
@@ -83,6 +91,69 @@ function writeJson(res: ServerResponse, statusCode: number, value: unknown, head
 
 function writeError(res: ServerResponse, id: string | number | null, code: number, message: string, headers: Record<string, string> = {}): void {
   writeJson(res, 200, { jsonrpc: "2.0", id, error: { code, message } }, headers);
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function isTrustedRemoteAddress(address: string | undefined): boolean {
+  return typeof address === "string" && isLoopbackAddress(address);
+}
+
+function touchSession(sessions: SessionRegistry, sessionId: string, ttlMs = DEFAULT_SESSION_TTL_MS): string {
+  sessions.set(sessionId, Date.now() + ttlMs);
+  return sessionId;
+}
+
+function getSessionId(req: IncomingMessage, url: URL): string | null {
+  const header = readHeaderValue(req.headers["mcp-session-id"]).trim();
+  if (header) return header;
+  const query = url.searchParams.get("session_id")?.trim();
+  return query || null;
+}
+
+function pruneExpiredSessions(sessions: SessionRegistry, now = Date.now()): void {
+  for (const [sessionId, expiresAt] of sessions) {
+    if (expiresAt <= now) {
+      sessions.delete(sessionId);
+    }
+  }
+}
+
+function allowPublicTool(name: string): boolean {
+  return name === SEND_TOOL_NAME
+    || name === REPLY_TOOL_NAME
+    || name === EDIT_TOOL_NAME
+    || name === DELETE_TOOL_NAME
+    || name === REACT_TOOL_NAME
+    || name === QUEUE_VOICE_TOOL_NAME
+    || name === CONTROL_VOICE_TOOL_NAME;
+}
+
+function requireBridgeRequestId(args: Record<string, unknown>): string {
+  const bridgeRequestId = readString(args.bridgeRequestId);
+  if (!bridgeRequestId) {
+    throw new Error("bridgeRequestId is required for public bridge actions.");
+  }
+  return bridgeRequestId;
+}
+
+function checkRateLimit(
+  buckets: Map<string, RateLimitBucket>,
+  remoteAddress: string,
+  maxRequests: number,
+  windowMs: number,
+  now = Date.now()
+): boolean {
+  const existing = buckets.get(remoteAddress);
+  if (!existing || now - existing.startedAt >= windowMs) {
+    buckets.set(remoteAddress, { startedAt: now, count: 1 });
+    return true;
+  }
+
+  existing.count += 1;
+  return existing.count <= maxRequests;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -351,21 +422,6 @@ async function handleReactToolCall(args: Record<string, unknown>, onReactDiscord
     reacted: true,
     emoji,
     messageId
-  };
-}
-
-async function handleGetChannelHistoryToolCall(args: Record<string, unknown>, onGetChannelHistory: StartMcpServerOptions["onGetChannelHistory"]): Promise<unknown> {
-  const channelId = readString(args.channelId);
-  if (!channelId) {
-    throw new Error("channelId is required");
-  }
-
-  const limit = readLimit(args.limit, 50);
-  const result = await onGetChannelHistory({ channelId, limit });
-  return {
-    channelId,
-    limit,
-    messages: result
   };
 }
 
@@ -759,28 +815,6 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
             }
           },
           {
-            name: HISTORY_TOOL_NAME,
-            description: HISTORY_TOOL_DESCRIPTION,
-            inputSchema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                channelId: {
-                  type: "string",
-                  description: "Discord channel id to read history from."
-                },
-                limit: {
-                  type: "number",
-                  description: "Number of recent messages to fetch.",
-                  default: 50,
-                  minimum: 1,
-                  maximum: 100
-                }
-              },
-              required: ["channelId"]
-            }
-          },
-          {
             name: QUEUE_VOICE_TOOL_NAME,
             description: QUEUE_VOICE_TOOL_DESCRIPTION,
             inputSchema: {
@@ -923,13 +957,17 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
     const name = typeof request.params?.name === "string" ? request.params.name : "";
     const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
 
-    if (name !== SEND_TOOL_NAME && name !== REPLY_TOOL_NAME && name !== EDIT_TOOL_NAME && name !== DELETE_TOOL_NAME && name !== REACT_TOOL_NAME && name !== HISTORY_TOOL_NAME && name !== QUEUE_VOICE_TOOL_NAME && name !== CONTROL_VOICE_TOOL_NAME) {
+    if (!allowPublicTool(name)) {
       return { jsonrpc: "2.0", id: request.id ?? null, error: { code: -32602, message: `Unknown tool: ${name}` } };
     }
 
     try {
       const startedAt = Date.now();
-      const bridgeRequestId = readString(args.bridgeRequestId);
+      const bridgeRequestId = name === QUEUE_VOICE_TOOL_NAME || name === CONTROL_VOICE_TOOL_NAME
+        ? requireBridgeRequestId(args)
+        : name === SEND_TOOL_NAME || name === REPLY_TOOL_NAME || name === EDIT_TOOL_NAME || name === DELETE_TOOL_NAME || name === REACT_TOOL_NAME
+          ? requireBridgeRequestId(args)
+          : readString(args.bridgeRequestId);
       log(`tools/call start name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""}`);
       const result = name === SEND_TOOL_NAME
         ? await handleSendToolCall(args, options.onSendDiscordMessage)
@@ -941,9 +979,7 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
               ? await handleDeleteToolCall(args, options.onDeleteDiscordMessage)
               : name === REACT_TOOL_NAME
                 ? await handleReactToolCall(args, options.onReactDiscordMessage)
-                : name === HISTORY_TOOL_NAME
-                  ? await handleGetChannelHistoryToolCall(args, options.onGetChannelHistory)
-                  : name === QUEUE_VOICE_TOOL_NAME
+                : name === QUEUE_VOICE_TOOL_NAME
                     ? await handleQueueVoiceTrackToolCall(args, options.onQueueVoiceTrack)
                     : await handleControlVoicePlaybackToolCall(args, options.onControlVoicePlayback);
       log(`tools/call ok name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""} durationMs=${Date.now() - startedAt}`);
@@ -983,13 +1019,29 @@ function readHeaderValue(value: string | string[] | undefined): string {
 
 export async function startMcpServer(options: StartMcpServerOptions): Promise<{ server: Server; port: number; }> {
   let listeningPort = options.port;
-  const origin = `http://${options.host}:${options.port}`;
+  const sessions: SessionRegistry = new Map();
+  const rateLimits = new Map<string, RateLimitBucket>();
+  const allowPublicHealth = options.allowPublicHealth ?? false;
+  const rateLimitMaxRequests = options.rateLimitMaxRequests ?? 120;
+  const rateLimitWindowMs = options.rateLimitWindowMs ?? 60_000;
+  const trustLocalRequests = options.trustLocalRequests ?? true;
   const server = createServer(async (req, res) => {
+    pruneExpiredSessions(sessions);
     const forwardedProto = readHeaderValue(req.headers["x-forwarded-proto"]);
     const hostHeader = readHeaderValue(req.headers.host) || `${options.host}:${options.port}`;
     const requestOrigin = `${forwardedProto || "http"}://${hostHeader}`;
     const url = new URL(req.url ?? "/", requestOrigin);
     const path = url.pathname;
+    const remoteAddress = req.socket.remoteAddress;
+    const isTrusted = trustLocalRequests && isTrustedRemoteAddress(remoteAddress);
+
+    if (!isTrusted) {
+      const rateLimitKey = remoteAddress ?? "unknown";
+      if (!checkRateLimit(rateLimits, rateLimitKey, rateLimitMaxRequests, rateLimitWindowMs)) {
+        writeJson(res, 429, { error: true, message: "Rate limit exceeded." });
+        return;
+      }
+    }
 
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
@@ -1002,6 +1054,10 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
     }
 
     if (req.method === "GET" && matchesRoute(path, "/health")) {
+      if (!allowPublicHealth && !isTrusted) {
+        writeJson(res, 404, { error: true, message: "Not found" });
+        return;
+      }
       writeJson(res, 200, await options.getHealthStatus());
       return;
     }
@@ -1012,7 +1068,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       ?? (isMountedRoot(path) ? path.replace(/\/+$/, "") : null);
 
     if (req.method === "GET" && (matchesRoute(path, "/mcp") || matchesRoute(path, "/sse") || isMountedRoot(path))) {
-      const sessionId = randomUUID();
+      const sessionId = touchSession(sessions, randomUUID());
       const endpoint = getMessageEndpoint(url.origin, mountedPrefix ?? "", sessionId);
 
       res.writeHead(200, {
@@ -1047,8 +1103,23 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
         return;
       }
 
+      let sessionId = getSessionId(req, url);
+      if (!sessionId) {
+        if (request.method !== "initialize") {
+          writeError(res, request.id ?? null, -32001, "Valid MCP session required.");
+          return;
+        }
+
+        sessionId = touchSession(sessions, randomUUID());
+      } else if (!sessions.has(sessionId)) {
+        writeError(res, request.id ?? null, -32001, "Valid MCP session required.");
+        return;
+      } else {
+        touchSession(sessions, sessionId);
+      }
+
       const response = await handleRequest(request, options);
-      writeJson(res, 200, response, url.searchParams.get("session_id") ? { "Mcp-Session-Id": url.searchParams.get("session_id") ?? "" } : {});
+      writeJson(res, 200, response, { "Mcp-Session-Id": sessionId });
       return;
     }
 

@@ -19,7 +19,6 @@ const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS = 15;
 const LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS = 60;
 
-let spotifyTokenSetup: Promise<void> | null = null;
 let lavalinkManager: LavalinkManager | null = null;
 
 interface VoiceTrack extends DiscordVoiceTrackSummary {
@@ -397,22 +396,6 @@ function readSpotifyAuthConfig():
   }
 
   return { clientId, clientSecret, refreshToken, market };
-}
-
-async function ensureSpotifyAuthConfigured(): Promise<void> {
-  if (spotifyTokenSetup) {
-    await spotifyTokenSetup;
-    return;
-  }
-
-  const config = readSpotifyAuthConfig();
-  if (!config) {
-    spotifyTokenSetup = Promise.resolve();
-    return;
-  }
-
-  spotifyTokenSetup = Promise.resolve();
-  await spotifyTokenSetup;
 }
 
 function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
@@ -807,7 +790,6 @@ async function resolveArtistTrack(
   requesterVoice: { id: string; name: string | null; }
 ): Promise<VoiceOperationResult> {
   const searchQuery = buildSpotifySearchQuery(input.artist ?? "", input.query);
-  await ensureSpotifyAuthConfigured();
   const spotifyConfig = readSpotifyAuthConfig();
   if (!spotifyConfig) {
     throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or send a direct link.");

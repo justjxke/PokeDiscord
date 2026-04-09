@@ -37,6 +37,9 @@ export interface BridgeConfig {
   pokeApiBaseUrl: string;
   mcpHost: string;
   mcpPort: number;
+  mcpAllowPublicHealth: boolean;
+  mcpRateLimitWindowMs: number;
+  mcpRateLimitMaxRequests: number;
   statePath: string;
   runtimeDbPath: string;
   contextMessageCount: number;

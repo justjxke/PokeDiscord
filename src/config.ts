@@ -6,6 +6,9 @@ import type { BridgeConfig } from "./types";
 const DEFAULT_MCP_PORT = 3000;
 const DEFAULT_POKE_API_BASE_URL = "https://poke.com/api/v1";
 const DEFAULT_MCP_HOST = "0.0.0.0";
+const DEFAULT_MCP_ALLOW_PUBLIC_HEALTH = false;
+const DEFAULT_MCP_RATE_LIMIT_WINDOW_MS = 60_000;
+const DEFAULT_MCP_RATE_LIMIT_MAX_REQUESTS = 120;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 40;
 const DEFAULT_LAVALINK_SECURE = false;
 const DEFAULT_LAVALINK_NAME = "poke-discord-bridge";
@@ -81,6 +84,9 @@ export function loadConfig(): BridgeConfig {
     pokeApiBaseUrl: process.env.POKE_API_BASE_URL ?? DEFAULT_POKE_API_BASE_URL,
     mcpHost: process.env.POKE_MCP_HOST ?? DEFAULT_MCP_HOST,
     mcpPort: readNumber(process.env.POKE_MCP_PORT, DEFAULT_MCP_PORT),
+    mcpAllowPublicHealth: readBoolean(process.env.POKE_MCP_ALLOW_PUBLIC_HEALTH, DEFAULT_MCP_ALLOW_PUBLIC_HEALTH),
+    mcpRateLimitWindowMs: readNumber(process.env.POKE_MCP_RATE_LIMIT_WINDOW_MS, DEFAULT_MCP_RATE_LIMIT_WINDOW_MS),
+    mcpRateLimitMaxRequests: readNumber(process.env.POKE_MCP_RATE_LIMIT_MAX_REQUESTS, DEFAULT_MCP_RATE_LIMIT_MAX_REQUESTS),
     statePath,
     runtimeDbPath,
     contextMessageCount: readNumber(process.env.POKE_CONTEXT_MESSAGES, DEFAULT_CONTEXT_MESSAGE_COUNT),

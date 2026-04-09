@@ -127,6 +127,98 @@ function normalizeGuildInstallations(value: unknown, stateSecret: string): Recor
   return guildInstallations;
 }
 
+function assertOptionalString(value: unknown, label: string): void {
+  if (value != null && typeof value !== "string") {
+    throw new Error(`${label} must be a string when present.`);
+  }
+}
+
+function assertOptionalNumber(value: unknown, label: string): void {
+  if (value != null && typeof value !== "number") {
+    throw new Error(`${label} must be a number when present.`);
+  }
+}
+
+function assertEncryptedSecretShape(value: unknown, label: string): void {
+  if (value == null) {
+    return;
+  }
+
+  if (!readEncryptedSecret(value)) {
+    throw new Error(`${label} is not a valid encrypted secret.`);
+  }
+}
+
+export function assertPersistedStateShape(raw: unknown): void {
+  if (!isRecord(raw)) {
+    throw new Error("Persisted state must be a JSON object.");
+  }
+
+  if (raw.owner != null) {
+    if (!isRecord(raw.owner)) {
+      throw new Error("owner must be an object when present.");
+    }
+
+    assertOptionalString(raw.owner.discordUserId ?? raw.owner.ownerUserId, "owner.discordUserId");
+    assertOptionalString(raw.owner.dmChannelId, "owner.dmChannelId");
+    assertOptionalNumber(raw.owner.linkedAt, "owner.linkedAt");
+    assertOptionalString(raw.owner.pokeApiKey, "owner.pokeApiKey");
+    assertEncryptedSecretShape(raw.owner.encryptedPokeApiKey, "owner.encryptedPokeApiKey");
+  }
+
+  if (raw.users != null) {
+    if (!isRecord(raw.users)) {
+      throw new Error("users must be an object when present.");
+    }
+
+    for (const [userId, value] of Object.entries(raw.users)) {
+      if (!isRecord(value)) {
+        throw new Error(`users.${userId} must be an object.`);
+      }
+
+      if (typeof value.dmChannelId !== "string" || !value.dmChannelId.trim().length) {
+        throw new Error(`users.${userId}.dmChannelId must be a non-empty string.`);
+      }
+
+      assertOptionalNumber(value.linkedAt, `users.${userId}.linkedAt`);
+      assertOptionalString(value.pokeApiKey, `users.${userId}.pokeApiKey`);
+      assertEncryptedSecretShape(value.encryptedPokeApiKey, `users.${userId}.encryptedPokeApiKey`);
+    }
+  }
+
+  if (raw.guildInstallations != null) {
+    if (!isRecord(raw.guildInstallations)) {
+      throw new Error("guildInstallations must be an object when present.");
+    }
+
+    for (const [guildId, value] of Object.entries(raw.guildInstallations)) {
+      if (!isRecord(value)) {
+        throw new Error(`guildInstallations.${guildId} must be an object.`);
+      }
+
+      if (typeof value.installedByUserId !== "string" || !value.installedByUserId.trim().length) {
+        throw new Error(`guildInstallations.${guildId}.installedByUserId must be a non-empty string.`);
+      }
+
+      assertOptionalNumber(value.installedAt, `guildInstallations.${guildId}.installedAt`);
+      assertOptionalNumber(value.updatedAt, `guildInstallations.${guildId}.updatedAt`);
+      assertOptionalNumber(value.linkedAt, `guildInstallations.${guildId}.linkedAt`);
+      if (value.allowedChannelIds != null && !Array.isArray(value.allowedChannelIds)) {
+        throw new Error(`guildInstallations.${guildId}.allowedChannelIds must be an array when present.`);
+      }
+      if (Array.isArray(value.allowedChannelIds) && value.allowedChannelIds.some(entry => typeof entry !== "string")) {
+        throw new Error(`guildInstallations.${guildId}.allowedChannelIds must contain only strings.`);
+      }
+      assertOptionalString(value.pokeApiKey, `guildInstallations.${guildId}.pokeApiKey`);
+      assertEncryptedSecretShape(value.encryptedPokeApiKey, `guildInstallations.${guildId}.encryptedPokeApiKey`);
+    }
+  }
+
+  if (raw.recentMessageIds != null && (!Array.isArray(raw.recentMessageIds) || raw.recentMessageIds.some(value => typeof value !== "string"))) {
+    throw new Error("recentMessageIds must be an array of strings when present.");
+  }
+}
+
 export function createDefaultState(_mode: BridgeMode = "hybrid"): BridgeState {
   return {
     mode: "hybrid",
@@ -316,10 +408,4 @@ export function getTenantPokeSecret(state: BridgeState, tenant: TenantReference,
 
   const guildInstallation = state.guildInstallations[tenant.id];
   return guildInstallation?.encryptedPokeApiKey ? decryptTenantSecret(guildInstallation.encryptedPokeApiKey, stateSecret) : null;
-}
-
-export function getTenantDisplayLabel(state: BridgeState, tenant: TenantReference): string {
-  if (tenant.kind === "owner") return "owner";
-  if (tenant.kind === "user") return `user ${tenant.id}`;
-  return `guild ${tenant.id}`;
 }

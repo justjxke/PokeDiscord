@@ -29,6 +29,7 @@ import {
   setOwnerLink,
   setUserLink
 } from "./bridgePolicy";
+import { downloadAttachmentBuffer } from "./attachmentFetch";
 import { buildDiscordRelayPrompt } from "./prompt";
 import { createVoiceManager, type VoiceManager } from "./voice";
 import { encryptTenantSecret } from "./tenantSecrets";
@@ -122,12 +123,10 @@ function guessAttachmentName(url: string): string {
 
 async function buildAttachmentBuilders(attachments: DiscordOutboundAttachment[]): Promise<AttachmentBuilder[]> {
   const built = await Promise.all(attachments.map(async attachment => {
-    const response = await fetch(attachment.url);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch attachment ${attachment.url}: ${response.status}`);
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = await downloadAttachmentBuffer(attachment.url, {
+      timeoutMs: 10_000,
+      maxBytes: 8 * 1024 * 1024
+    });
     const name = attachment.name?.trim() || guessAttachmentName(attachment.url);
     return new AttachmentBuilder(buffer, { name });
   }));

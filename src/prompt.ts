@@ -100,14 +100,6 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
   return lines.filter((line): line is string => line != null).join("\n");
 }
 
-export function buildGuildPrompt(): string {
-  return buildPromptWithPreface(GUILD_PREFACE);
-}
-
-export function buildDmPrompt(): string {
-  return buildPromptWithPreface(DM_PREFACE);
-}
-
 export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
   const preface = request.mode === "guild" ? GUILD_PREFACE : DM_PREFACE;
   return buildPromptWithPreface(preface, request);

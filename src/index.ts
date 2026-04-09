@@ -14,6 +14,7 @@ import {
 import { loadConfig } from "./config";
 import { loadState, saveState, type BridgeState } from "./state";
 import type { DiscordRelayRequest } from "./types";
+import { withManagedTypingIndicator } from "./typingLifecycle";
 import type { VoiceManager } from "./voice";
 import {
   createWorkerMessageParser,
@@ -150,16 +151,6 @@ async function main(): Promise<void> {
           respond(request, await voiceManager.controlVoicePlayback(payload));
           return;
         }
-        case "stopTypingIndicator": {
-          const payload = (request as WorkerRequestMessage<"stopTypingIndicator">).payload;
-          const stopTyping = typingStops.get(payload.bridgeRequestId);
-          if (stopTyping) {
-            typingStops.delete(payload.bridgeRequestId);
-            await stopTyping();
-          }
-          respond(request, null);
-          return;
-        }
         default:
           respondError(request, new Error(`Unsupported supervisor request: ${request.method}`));
       }
@@ -197,29 +188,15 @@ async function main(): Promise<void> {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", chunk => parser(chunk.toString()));
 
-  const runtime = await startDiscordBot(config, state, async next => persistState(next), async request => {
-    if (!typingStops.has(request.bridgeRequestId)) {
-      try {
-        typingStops.set(
-          request.bridgeRequestId,
-          await startDeferredTypingIndicator(discordClient!, request.replyTarget.channelId)
-        );
-      } catch {
-        // Ignore typing failures; they are best-effort only.
-      }
-    }
-
-    try {
-      return await sendRequestToSupervisor("relayRequest", { request });
-    } catch (error) {
-      const stopTyping = typingStops.get(request.bridgeRequestId);
-      if (stopTyping) {
-        typingStops.delete(request.bridgeRequestId);
-        await stopTyping();
-      }
-      throw error;
-    }
-  });
+  const runtime = await startDiscordBot(config, state, async next => persistState(next), async request =>
+    withManagedTypingIndicator(
+      typingStops,
+      request.bridgeRequestId,
+      () => startDeferredTypingIndicator(discordClient!, request.replyTarget.channelId),
+      () => sendRequestToSupervisor("relayRequest", { request }),
+      () => {}
+    )
+  );
 
   discordClient = runtime.client;
   voiceManager = runtime.voiceManager;

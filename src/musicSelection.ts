@@ -35,11 +35,3 @@ export function rankArtistBoundTracks(
   const recent = matching.filter(candidate => recentCandidates.has(candidateKey(candidate)));
   return [...fresh, ...recent];
 }
-
-export function selectArtistBoundTrack(
-  candidates: MusicSelectionCandidate[],
-  requestedArtist: string,
-  recentCandidates: Set<string>
-): MusicSelectionCandidate | null {
-  return rankArtistBoundTracks(candidates, requestedArtist, recentCandidates)[0] ?? null;
-}
