@@ -20,8 +20,6 @@ export interface RuntimeStore {
   close(): void;
 }
 
-const DEFAULT_TTL_MS = 30 * 60 * 1000;
-
 function parseJson<T>(raw: string): T {
   return JSON.parse(raw) as T;
 }
@@ -89,14 +87,14 @@ export function createRuntimeStore(path: string): RuntimeStore {
   const cleanupSentMessages = db.query("DELETE FROM sent_messages WHERE updated_at < ?1");
 
   return {
-    saveRequest(request, ttlMs = DEFAULT_TTL_MS) {
+    saveRequest(request) {
       const now = Date.now();
       const storedAt = request.replyTarget.createdAt || now;
       const record: RuntimeRequestRecord = {
         request,
         storedAt,
         updatedAt: now,
-        expiresAt: storedAt + ttlMs
+        expiresAt: Number.MAX_SAFE_INTEGER
       };
 
       upsertRequest.run({
@@ -150,10 +148,7 @@ export function createRuntimeStore(path: string): RuntimeStore {
       return parseJson<{ bridgeRequestId: string; } & DiscordSentMessageRecord>(row.payload);
     },
 
-    cleanupExpired(now = Date.now(), ttlMs = DEFAULT_TTL_MS) {
-      cleanupRequestContexts.run(now);
-      cleanupSentMessages.run(now - ttlMs);
-    },
+    cleanupExpired() {},
 
     close() {
       db.close();

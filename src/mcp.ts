@@ -67,7 +67,7 @@ const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
 const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session. For action=volume, always provide value as an explicit integer from 0 to 150.";
 const MAX_BODY_BYTES = 128_000;
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id";
-const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_SESSION_TTL_MS = Number.MAX_SAFE_INTEGER;
 
 type SessionRegistry = Map<string, number>;
 type RateLimitBucket = {

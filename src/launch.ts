@@ -23,9 +23,6 @@ const LAVALINK_JAR = "/data/Lavalink.jar";
 const LAVALINK_CONFIG = "/data/application.yml";
 const JAVA_DOWNLOAD_URL = "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jre/hotspot/normal/eclipse";
 const LAVALINK_DOWNLOAD_URL = "https://github.com/lavalink-devs/Lavalink/releases/latest/download/Lavalink.jar";
-const RUNTIME_CONTEXT_TTL_MS = 30 * 60 * 1000;
-const RUNTIME_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
-
 const log = (message: string) => {
   process.stdout.write(`[poke-discord-bridge:launcher] ${message}\n`);
 };
@@ -230,10 +227,6 @@ async function main(): Promise<void> {
 
   log(`MCP server listening on http://${config.mcpHost}:${mcp.port}`);
 
-  const cleanupInterval = setInterval(() => {
-    runtimeStore.cleanupExpired(Date.now(), RUNTIME_CONTEXT_TTL_MS);
-  }, RUNTIME_CLEANUP_INTERVAL_MS);
-
   log("Bootstrapping Lavalink...");
   await ensureLavalinkConfig(buildLavalinkConfig(lavalinkPassword, {
     youtubeOauthEnabled: config.youtubeOauthEnabled,
@@ -308,7 +301,7 @@ async function main(): Promise<void> {
 
   let workerRestartDelayMs = 1000;
   const handleRelayRequest = async (request: DiscordRelayRequest) => {
-    runtimeStore.saveRequest(request, RUNTIME_CONTEXT_TTL_MS);
+    runtimeStore.saveRequest(request);
     const state = await loadState(config.statePath, config.stateSecret);
     const pokeApiKey = getTenantPokeSecret(state, request.tenant, config.stateSecret);
     if (!pokeApiKey) {
