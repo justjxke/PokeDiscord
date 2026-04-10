@@ -84,11 +84,12 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
 
     lines.push(
       "",
-      "When you want to send a plain Discord message, call sendDiscordMessage with the same bridge request id and the reply target channel id from above. You may include attachments and embeds.",
+      "When you want to send a plain Discord message, call sendDiscordMessage with the reply target channel id from above. You may include attachments and embeds.",
       "When you want to reply to a specific Discord message, call replyToDiscordMessage with the message id you want to reply to. You may include attachments and embeds.",
       "When you want to edit a message the bridge already sent, call editDiscordMessage with the message id and new content or embeds.",
       "When you want to delete a message the bridge already sent, call deleteDiscordMessage with the message id.",
       "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id.",
+      "If you are acting later or outside the current Discord turn, prefer explicit channelId and messageId values instead of reusing the bridge request id.",
       "When you want to join or control voice playback, use queueVoiceTrack for either a concrete playable url or an artist-bound music request with artist and optional query. Use queueVoiceTrack with position=front when the user wants play next. Use controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, clear, volume, seek, shuffle, loop, and move.",
       "For controlVoicePlayback action=volume, you must always send value as an explicit integer from 0 to 150. If the user says louder or quieter without a number, choose a sensible concrete integer and send it.",
       "Examples: set volume to 50 => action=volume value=50. Jump to 90 seconds => action=seek positionMs=90000. Loop the queue => action=loop loopMode=queue."

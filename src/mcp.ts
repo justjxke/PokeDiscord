@@ -131,10 +131,20 @@ function allowPublicTool(name: string): boolean {
     || name === CONTROL_VOICE_TOOL_NAME;
 }
 
-function requireBridgeRequestId(args: Record<string, unknown>): string {
+export function resolvePublicMessageTargetInputs(args: Record<string, unknown>): { channelId?: string; bridgeRequestId?: string } {
+  const channelId = readString(args.channelId);
+  const bridgeRequestId = readString(args.bridgeRequestId);
+  if (!channelId && !bridgeRequestId) {
+    throw new Error("channelId or bridgeRequestId is required.");
+  }
+
+  return { channelId, bridgeRequestId };
+}
+
+export function requireBridgeRequestId(args: Record<string, unknown>): string {
   const bridgeRequestId = readString(args.bridgeRequestId);
   if (!bridgeRequestId) {
-    throw new Error("bridgeRequestId is required for public bridge actions.");
+    throw new Error("bridgeRequestId is required.");
   }
   return bridgeRequestId;
 }
@@ -300,8 +310,7 @@ async function handleSendToolCall(args: Record<string, unknown>, onSendDiscordMe
     throw new Error("content, attachments, or embeds is required");
   }
 
-  const channelId = readString(args.channelId);
-  const bridgeRequestId = readString(args.bridgeRequestId);
+  const { channelId, bridgeRequestId } = resolvePublicMessageTargetInputs(args);
   const replyToMessageId = readString(args.replyToMessageId);
   const chunks = content ? splitDiscordContent(content) : [""];
   const messageIds: string[] = [];
@@ -337,8 +346,7 @@ async function handleReplyToolCall(args: Record<string, unknown>, onSendDiscordM
     throw new Error("messageId is required");
   }
 
-  const channelId = readString(args.channelId);
-  const bridgeRequestId = readString(args.bridgeRequestId);
+  const { channelId, bridgeRequestId } = resolvePublicMessageTargetInputs(args);
   const chunks = content ? splitDiscordContent(content) : [""];
   const messageIds: string[] = [];
 
@@ -377,8 +385,7 @@ async function handleEditToolCall(args: Record<string, unknown>, onEditDiscordMe
     throw new Error("messageId is required");
   }
 
-  const channelId = readString(args.channelId);
-  const bridgeRequestId = readString(args.bridgeRequestId);
+  const { channelId, bridgeRequestId } = resolvePublicMessageTargetInputs(args);
   await onEditDiscordMessage({ content, embeds, channelId, bridgeRequestId, messageId });
 
   return {
@@ -393,8 +400,7 @@ async function handleDeleteToolCall(args: Record<string, unknown>, onDeleteDisco
     throw new Error("messageId is required");
   }
 
-  const channelId = typeof args.channelId === "string" && args.channelId.trim().length ? args.channelId.trim() : undefined;
-  const bridgeRequestId = typeof args.bridgeRequestId === "string" && args.bridgeRequestId.trim().length ? args.bridgeRequestId.trim() : undefined;
+  const { channelId, bridgeRequestId } = resolvePublicMessageTargetInputs(args);
   await onDeleteDiscordMessage({ channelId, bridgeRequestId, messageId });
 
   return {
@@ -414,8 +420,7 @@ async function handleReactToolCall(args: Record<string, unknown>, onReactDiscord
     throw new Error("messageId is required");
   }
 
-  const channelId = typeof args.channelId === "string" && args.channelId.trim().length ? args.channelId.trim() : undefined;
-  const bridgeRequestId = typeof args.bridgeRequestId === "string" && args.bridgeRequestId.trim().length ? args.bridgeRequestId.trim() : undefined;
+  const { channelId, bridgeRequestId } = resolvePublicMessageTargetInputs(args);
   await onReactDiscordMessage({ emoji, channelId, bridgeRequestId, messageId });
 
   return {
@@ -965,9 +970,7 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
       const startedAt = Date.now();
       const bridgeRequestId = name === QUEUE_VOICE_TOOL_NAME || name === CONTROL_VOICE_TOOL_NAME
         ? requireBridgeRequestId(args)
-        : name === SEND_TOOL_NAME || name === REPLY_TOOL_NAME || name === EDIT_TOOL_NAME || name === DELETE_TOOL_NAME || name === REACT_TOOL_NAME
-          ? requireBridgeRequestId(args)
-          : readString(args.bridgeRequestId);
+        : readString(args.bridgeRequestId);
       log(`tools/call start name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""}`);
       const result = name === SEND_TOOL_NAME
         ? await handleSendToolCall(args, options.onSendDiscordMessage)

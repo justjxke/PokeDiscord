@@ -21,12 +21,12 @@ export function resolveReplyChannelId(
   store: RuntimeTargetStore,
   meta?: { channelId?: string; bridgeRequestId?: string }
 ): string {
-  if (meta?.bridgeRequestId) {
-    return resolveRequestContext(store, meta.bridgeRequestId).replyTarget.channelId;
-  }
-
   if (meta?.channelId) {
     return meta.channelId;
+  }
+
+  if (meta?.bridgeRequestId) {
+    return resolveRequestContext(store, meta.bridgeRequestId).replyTarget.channelId;
   }
 
   throw new Error("Discord reply target not found.");
@@ -36,6 +36,13 @@ export function resolveSentMessageTarget(
   store: RuntimeTargetStore,
   meta?: { channelId?: string; bridgeRequestId?: string; messageId?: string }
 ): { channelId: string; messageId: string } {
+  if (meta?.channelId && meta?.messageId) {
+    return {
+      channelId: meta.channelId,
+      messageId: meta.messageId
+    };
+  }
+
   if (meta?.bridgeRequestId) {
     const record = store.getSentMessages(meta.bridgeRequestId);
     if (!record) {
@@ -59,13 +66,6 @@ export function resolveSentMessageTarget(
     return {
       channelId: record.channelId,
       messageId: record.messageIds[0] as string
-    };
-  }
-
-  if (meta?.channelId && meta?.messageId) {
-    return {
-      channelId: meta.channelId,
-      messageId: meta.messageId
     };
   }
 
