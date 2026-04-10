@@ -23,6 +23,7 @@ interface StartMcpServerOptions {
   allowPublicHealth?: boolean;
   rateLimitWindowMs?: number;
   rateLimitMaxRequests?: number;
+  sessionTtlMs?: number;
   trustLocalRequests?: boolean;
   getHealthStatus: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   onSendDiscordMessage: (content: string, meta?: { channelId?: string; bridgeRequestId?: string; replyToMessageId?: string; attachments?: DiscordOutboundAttachment[]; embeds?: DiscordOutboundEmbed[]; }) => Promise<string[]>;
@@ -129,6 +130,20 @@ function allowPublicTool(name: string): boolean {
     || name === REACT_TOOL_NAME
     || name === QUEUE_VOICE_TOOL_NAME
     || name === CONTROL_VOICE_TOOL_NAME;
+}
+
+function canBypassSessionForToolCall(request: JsonRpcRequest): boolean {
+  if (request.method !== "tools/call") {
+    return false;
+  }
+
+  const name = typeof request.params?.name === "string" ? request.params.name : "";
+  if (!allowPublicTool(name) || name === QUEUE_VOICE_TOOL_NAME || name === CONTROL_VOICE_TOOL_NAME) {
+    return false;
+  }
+
+  const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
+  return readString(args.channelId) != null;
 }
 
 export function resolvePublicMessageTargetInputs(args: Record<string, unknown>): { channelId?: string; bridgeRequestId?: string } {
@@ -1027,6 +1042,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
   const allowPublicHealth = options.allowPublicHealth ?? false;
   const rateLimitMaxRequests = options.rateLimitMaxRequests ?? 120;
   const rateLimitWindowMs = options.rateLimitWindowMs ?? 60_000;
+  const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
   const trustLocalRequests = options.trustLocalRequests ?? true;
   const server = createServer(async (req, res) => {
     pruneExpiredSessions(sessions);
@@ -1071,7 +1087,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       ?? (isMountedRoot(path) ? path.replace(/\/+$/, "") : null);
 
     if (req.method === "GET" && (matchesRoute(path, "/mcp") || matchesRoute(path, "/sse") || isMountedRoot(path))) {
-      const sessionId = touchSession(sessions, randomUUID());
+      const sessionId = touchSession(sessions, randomUUID(), sessionTtlMs);
       const endpoint = getMessageEndpoint(url.origin, mountedPrefix ?? "", sessionId);
 
       res.writeHead(200, {
@@ -1107,18 +1123,23 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       }
 
       let sessionId = getSessionId(req, url);
+      const canBypassSession = canBypassSessionForToolCall(request);
       if (!sessionId) {
-        if (request.method !== "initialize") {
+        if (request.method !== "initialize" && !canBypassSession) {
           writeError(res, request.id ?? null, -32001, "Valid MCP session required.");
           return;
         }
 
-        sessionId = touchSession(sessions, randomUUID());
+        sessionId = touchSession(sessions, randomUUID(), sessionTtlMs);
       } else if (!sessions.has(sessionId)) {
-        writeError(res, request.id ?? null, -32001, "Valid MCP session required.");
-        return;
+        if (!canBypassSession) {
+          writeError(res, request.id ?? null, -32001, "Valid MCP session required.");
+          return;
+        }
+
+        touchSession(sessions, sessionId, sessionTtlMs);
       } else {
-        touchSession(sessions, sessionId);
+        touchSession(sessions, sessionId, sessionTtlMs);
       }
 
       const response = await handleRequest(request, options);
