@@ -38,6 +38,7 @@ import type {
   BridgeConfig,
   DiscordAttachmentContext,
   DiscordChannelHistoryMessage,
+  DiscordChannelHistoryPage,
   DiscordMessageContext,
   DiscordOutboundAttachment,
   DiscordOutboundEmbed,
@@ -271,9 +272,18 @@ function getInteractionDisplayName(interaction: ChatInputCommandInteraction): st
   return interaction.user.globalName ?? interaction.user.username;
 }
 
-export async function getDiscordChannelHistory(client: Client, channelId: string, limit = 50): Promise<DiscordChannelHistoryMessage[]> {
+export async function getDiscordChannelHistory(
+  client: Client,
+  channelId: string,
+  options: { limit?: number; beforeMessageId?: string; afterMessageId?: string } = {}
+): Promise<DiscordChannelHistoryPage> {
+  const limit = options.limit ?? 50;
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new Error("limit must be between 1 and 100");
+  }
+
+  if (options.beforeMessageId && options.afterMessageId) {
+    throw new Error("beforeMessageId and afterMessageId cannot be used together");
   }
 
   const channel = await client.channels.fetch(channelId);
@@ -281,8 +291,13 @@ export async function getDiscordChannelHistory(client: Client, channelId: string
     throw new Error("Discord channel not found.");
   }
 
-  const fetched = await channel.messages.fetch({ limit });
-  return Array.from(fetched.values())
+  const fetched = await channel.messages.fetch({
+    limit,
+    ...(options.beforeMessageId ? { before: options.beforeMessageId } : {}),
+    ...(options.afterMessageId ? { after: options.afterMessageId } : {})
+  });
+
+  const messages = Array.from(fetched.values())
     .sort((left, right) => left.createdTimestamp - right.createdTimestamp)
     .map(message => ({
       id: message.id,
@@ -292,6 +307,17 @@ export async function getDiscordChannelHistory(client: Client, channelId: string
       isReply: message.reference != null,
       attachments: Array.from(message.attachments.values()).map(formatChannelHistoryAttachment)
     }));
+
+  const nextBeforeMessageId = messages[0]?.id ?? null;
+  const nextAfterMessageId = messages[messages.length - 1]?.id ?? null;
+
+  return {
+    messages,
+    nextBeforeMessageId,
+    nextAfterMessageId,
+    hasMoreBefore: options.afterMessageId ? messages.length > 0 : messages.length === limit,
+    hasMoreAfter: options.beforeMessageId ? true : options.afterMessageId ? messages.length === limit : false
+  };
 }
 
 function isLikelyPokeApiKey(value: string): boolean {

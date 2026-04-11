@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import type { DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
+import type { DiscordChannelHistoryPage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
 import type { VoiceOperationResult } from "./voice";
 
 type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear" | "volume" | "seek" | "shuffle" | "loop" | "move";
@@ -30,7 +30,7 @@ interface StartMcpServerOptions {
   onEditDiscordMessage: (meta: { content?: string; embeds?: DiscordOutboundEmbed[]; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onReactDiscordMessage: (meta: { emoji: string; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
-  onGetChannelHistory: (meta: { channelId: string; limit: number; }) => Promise<DiscordChannelHistoryMessage[]>;
+  onGetChannelHistory: (meta: { channelId: string; limit: number; beforeMessageId?: string; afterMessageId?: string; }) => Promise<DiscordChannelHistoryPage>;
   onQueueVoiceTrack: (meta: QueueVoiceTrackRequest) => Promise<VoiceOperationResult>;
   onControlVoicePlayback: (meta: ControlVoicePlaybackRequest) => Promise<VoiceOperationResult>;
 }
@@ -63,7 +63,7 @@ const DELETE_TOOL_DESCRIPTION = "Delete a specific Discord message the bridge al
 const REACT_TOOL_NAME = "reactToDiscordMessage";
 const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
 const HISTORY_TOOL_NAME = "getChannelHistory";
-const HISTORY_TOOL_DESCRIPTION = "Fetch recent messages from a Discord channel.";
+const HISTORY_TOOL_DESCRIPTION = "Fetch recent messages from a Discord channel with cursor pagination.";
 const QUEUE_VOICE_TOOL_NAME = "queueVoiceTrack";
 const QUEUE_VOICE_TOOL_DESCRIPTION = "Queue music in the current guild voice session. Use a concrete playable URL with url, or use artist plus optional query for Spotify-first discovery when the user only names an artist or gives a vague music request. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found.";
 const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
@@ -252,7 +252,13 @@ async function handleGetChannelHistoryToolCall(
   }
 
   const limit = readLimit(args.limit, 50);
-  return onGetChannelHistory({ channelId, limit });
+  const beforeMessageId = readString(args.beforeMessageId);
+  const afterMessageId = readString(args.afterMessageId);
+  if (beforeMessageId && afterMessageId) {
+    throw new Error("beforeMessageId and afterMessageId cannot be used together");
+  }
+
+  return onGetChannelHistory({ channelId, limit, ...(beforeMessageId ? { beforeMessageId } : {}), ...(afterMessageId ? { afterMessageId } : {}) });
 }
 
 function matchesRoute(path: string, route: string): boolean {
@@ -868,6 +874,14 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                   maximum: 100,
                   default: 50,
                   description: "Optional maximum number of messages to return."
+                },
+                beforeMessageId: {
+                  type: "string",
+                  description: "Fetch messages older than this message id."
+                },
+                afterMessageId: {
+                  type: "string",
+                  description: "Fetch messages newer than this message id."
                 }
               },
               required: ["channelId"]

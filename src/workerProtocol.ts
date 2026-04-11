@@ -1,5 +1,6 @@
 import type {
   DiscordChannelHistoryMessage,
+  DiscordChannelHistoryPage,
   DiscordOutboundAttachment,
   DiscordOutboundEmbed,
   DiscordRelayRequest,
@@ -43,6 +44,8 @@ export interface WorkerRequestPayloadMap {
   getChannelHistory: {
     channelId: string;
     limit: number;
+    beforeMessageId?: string;
+    afterMessageId?: string;
   };
   queueVoiceTrack: QueueVoiceTrackInput;
   controlVoicePlayback: ControlVoicePlaybackInput;
@@ -56,7 +59,7 @@ export interface WorkerResponsePayloadMap {
   editDiscordMessage: null;
   deleteDiscordMessage: null;
   reactDiscordMessage: null;
-  getChannelHistory: DiscordChannelHistoryMessage[];
+  getChannelHistory: DiscordChannelHistoryPage;
   queueVoiceTrack: VoiceOperationResult;
   controlVoicePlayback: VoiceOperationResult;
   relayRequest: PokeSendResult;

@@ -90,6 +90,14 @@ export interface DiscordChannelHistoryMessage {
   attachments: DiscordChannelHistoryAttachment[];
 }
 
+export interface DiscordChannelHistoryPage {
+  messages: DiscordChannelHistoryMessage[];
+  nextBeforeMessageId: string | null;
+  nextAfterMessageId: string | null;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
+
 export interface DiscordVoiceChannelSnapshot {
   id: string | null;
   name: string | null;

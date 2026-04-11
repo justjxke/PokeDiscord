@@ -28,7 +28,13 @@ test("accepts a stale MCP session for explicit-channel outbound sends", async ()
     onEditDiscordMessage: async () => undefined,
     onDeleteDiscordMessage: async () => undefined,
     onReactDiscordMessage: async () => undefined,
-    onGetChannelHistory: async () => [],
+    onGetChannelHistory: async () => ({
+      messages: [],
+      nextBeforeMessageId: null,
+      nextAfterMessageId: null,
+      hasMoreBefore: false,
+      hasMoreAfter: false
+    }),
     onQueueVoiceTrack: async () => ({ ok: true, action: "queue", message: "ok", session: null }),
     onControlVoicePlayback: async () => ({ ok: true, action: "control", message: "ok", session: null })
   });
@@ -99,8 +105,14 @@ test("lists and serves channel history as a public tool", async () => {
     onDeleteDiscordMessage: async () => undefined,
     onReactDiscordMessage: async () => undefined,
     onGetChannelHistory: async meta => {
-      expect(meta).toEqual({ channelId: "channel-123", limit: 25 });
-      return history;
+      expect(meta).toEqual({ channelId: "channel-123", limit: 25, beforeMessageId: "msg-5" });
+      return {
+        messages: history,
+        nextBeforeMessageId: "msg-1",
+        nextAfterMessageId: "msg-1",
+        hasMoreBefore: false,
+        hasMoreAfter: false
+      };
     },
     onQueueVoiceTrack: async () => ({ ok: true, action: "queue", message: "ok", session: null }),
     onControlVoicePlayback: async () => ({ ok: true, action: "control", message: "ok", session: null })
@@ -138,7 +150,8 @@ test("lists and serves channel history as a public tool", async () => {
         name: "getChannelHistory",
         arguments: {
           channelId: "channel-123",
-          limit: 25
+          limit: 25,
+          beforeMessageId: "msg-5"
         }
       }
     }, sessionId ?? undefined);
@@ -152,8 +165,10 @@ test("lists and serves channel history as a public tool", async () => {
     };
 
     expect(payload.result?.isError).toBe(false);
+    expect(payload.result?.content?.[0]?.text).toContain('"messages"');
     expect(payload.result?.content?.[0]?.text).toContain('"author":"alice"');
     expect(payload.result?.content?.[0]?.text).toContain('"content":"hello from history"');
+    expect(payload.result?.content?.[0]?.text).toContain('"nextBeforeMessageId":"msg-1"');
   } finally {
     server.close();
   }

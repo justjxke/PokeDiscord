@@ -208,7 +208,9 @@ async function main(): Promise<void> {
       if (!currentWorker) throw new Error("Discord worker is not ready.");
       return currentWorker.request("getChannelHistory", {
         channelId: meta.channelId,
-        limit: meta.limit
+        limit: meta.limit,
+        ...(meta.beforeMessageId ? { beforeMessageId: meta.beforeMessageId } : {}),
+        ...(meta.afterMessageId ? { afterMessageId: meta.afterMessageId } : {})
       });
     },
     onQueueVoiceTrack: async meta => {
@@ -275,7 +277,6 @@ async function main(): Promise<void> {
   const shutdown = async (code: number) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    clearInterval(cleanupInterval);
     worker?.kill("SIGTERM");
     lavalink.kill("SIGTERM");
     runtimeStore.close();

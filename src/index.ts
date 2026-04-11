@@ -136,7 +136,11 @@ async function main(): Promise<void> {
         }
         case "getChannelHistory": {
           const payload = (request as WorkerRequestMessage<"getChannelHistory">).payload;
-          respond(request, await getDiscordChannelHistory(discordClient, payload.channelId, payload.limit));
+          respond(request, await getDiscordChannelHistory(discordClient, payload.channelId, {
+            limit: payload.limit,
+            ...(payload.beforeMessageId ? { beforeMessageId: payload.beforeMessageId } : {}),
+            ...(payload.afterMessageId ? { afterMessageId: payload.afterMessageId } : {})
+          }));
           return;
         }
         case "queueVoiceTrack": {
