@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import type { DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
+import type { DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
 import type { VoiceOperationResult } from "./voice";
 
 type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear" | "volume" | "seek" | "shuffle" | "loop" | "move";
@@ -30,6 +30,7 @@ interface StartMcpServerOptions {
   onEditDiscordMessage: (meta: { content?: string; embeds?: DiscordOutboundEmbed[]; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onReactDiscordMessage: (meta: { emoji: string; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
+  onGetChannelHistory: (meta: { channelId: string; limit: number; }) => Promise<DiscordChannelHistoryMessage[]>;
   onQueueVoiceTrack: (meta: QueueVoiceTrackRequest) => Promise<VoiceOperationResult>;
   onControlVoicePlayback: (meta: ControlVoicePlaybackRequest) => Promise<VoiceOperationResult>;
 }
@@ -61,6 +62,8 @@ const DELETE_TOOL_NAME = "deleteDiscordMessage";
 const DELETE_TOOL_DESCRIPTION = "Delete a specific Discord message the bridge already sent.";
 const REACT_TOOL_NAME = "reactToDiscordMessage";
 const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
+const HISTORY_TOOL_NAME = "getChannelHistory";
+const HISTORY_TOOL_DESCRIPTION = "Fetch recent messages from a Discord channel.";
 const QUEUE_VOICE_TOOL_NAME = "queueVoiceTrack";
 const QUEUE_VOICE_TOOL_DESCRIPTION = "Queue music in the current guild voice session. Use a concrete playable URL with url, or use artist plus optional query for Spotify-first discovery when the user only names an artist or gives a vague music request. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found.";
 const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
@@ -128,6 +131,7 @@ function allowPublicTool(name: string): boolean {
     || name === EDIT_TOOL_NAME
     || name === DELETE_TOOL_NAME
     || name === REACT_TOOL_NAME
+    || name === HISTORY_TOOL_NAME
     || name === QUEUE_VOICE_TOOL_NAME
     || name === CONTROL_VOICE_TOOL_NAME;
 }
@@ -236,6 +240,19 @@ function readLimit(value: unknown, fallback: number): number {
     throw new Error("limit must be an integer between 1 and 100");
   }
   return parsed;
+}
+
+async function handleGetChannelHistoryToolCall(
+  args: Record<string, unknown>,
+  onGetChannelHistory: StartMcpServerOptions["onGetChannelHistory"]
+): Promise<unknown> {
+  const channelId = readString(args.channelId);
+  if (!channelId) {
+    throw new Error("channelId is required");
+  }
+
+  const limit = readLimit(args.limit, 50);
+  return onGetChannelHistory({ channelId, limit });
 }
 
 function matchesRoute(path: string, route: string): boolean {
@@ -835,6 +852,28 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
             }
           },
           {
+            name: HISTORY_TOOL_NAME,
+            description: HISTORY_TOOL_DESCRIPTION,
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                channelId: {
+                  type: "string",
+                  description: "Discord channel id to fetch history from."
+                },
+                limit: {
+                  type: "number",
+                  minimum: 1,
+                  maximum: 100,
+                  default: 50,
+                  description: "Optional maximum number of messages to return."
+                }
+              },
+              required: ["channelId"]
+            }
+          },
+          {
             name: QUEUE_VOICE_TOOL_NAME,
             description: QUEUE_VOICE_TOOL_DESCRIPTION,
             inputSchema: {
@@ -997,7 +1036,9 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
               ? await handleDeleteToolCall(args, options.onDeleteDiscordMessage)
               : name === REACT_TOOL_NAME
                 ? await handleReactToolCall(args, options.onReactDiscordMessage)
-                : name === QUEUE_VOICE_TOOL_NAME
+                : name === HISTORY_TOOL_NAME
+                  ? await handleGetChannelHistoryToolCall(args, options.onGetChannelHistory)
+                  : name === QUEUE_VOICE_TOOL_NAME
                     ? await handleQueueVoiceTrackToolCall(args, options.onQueueVoiceTrack)
                     : await handleControlVoicePlaybackToolCall(args, options.onControlVoicePlayback);
       log(`tools/call ok name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""} durationMs=${Date.now() - startedAt}`);

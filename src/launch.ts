@@ -203,6 +203,14 @@ async function main(): Promise<void> {
         emoji: meta.emoji
       });
     },
+    onGetChannelHistory: async meta => {
+      const currentWorker = worker;
+      if (!currentWorker) throw new Error("Discord worker is not ready.");
+      return currentWorker.request("getChannelHistory", {
+        channelId: meta.channelId,
+        limit: meta.limit
+      });
+    },
     onQueueVoiceTrack: async meta => {
       const currentWorker = worker;
       if (!currentWorker) throw new Error("Discord worker is not ready.");
