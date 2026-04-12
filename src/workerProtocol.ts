@@ -23,6 +23,7 @@ export interface WorkerRequestPayloadMap {
     channelId: string;
     content: string;
     replyToMessageId?: string;
+    userId?: string;
     attachments?: DiscordOutboundAttachment[];
     embeds?: DiscordOutboundEmbed[];
   };
