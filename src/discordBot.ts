@@ -156,6 +156,7 @@ function buildEmbedBuilder(embed: DiscordOutboundEmbed): EmbedBuilder {
 
 interface OutboundMessageOptions {
   replyToMessageId?: string;
+  userId?: string;
   attachments?: DiscordOutboundAttachment[];
   embeds?: DiscordOutboundEmbed[];
 }
@@ -204,6 +205,31 @@ async function sendTextMessage(channel: Message["channel"] | ChatInputCommandInt
   }
 
   await channel.send(content);
+}
+
+async function resolveSendTargetChannel(client: Client, channelId: string, fallbackUserId?: string): Promise<{ send: (content: string | { content?: string; reply?: { messageReference: string; failIfNotExists: boolean; }; files?: AttachmentBuilder[]; embeds?: EmbedBuilder[]; }) => Promise<{ id: string }>; }> {
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (isSendableChannel(channel) && channel.isTextBased()) {
+      return channel;
+    }
+  } catch {
+    // Try DM fallback below.
+  }
+
+  if (fallbackUserId) {
+    try {
+      const user = await client.users.fetch(fallbackUserId);
+      const dmChannel = await user.createDM();
+      if (isSendableChannel(dmChannel) && dmChannel.isTextBased()) {
+        return dmChannel;
+      }
+    } catch {
+      // Fall through to the generic error below.
+    }
+  }
+
+  throw new Error("Discord channel not found.");
 }
 
 function readCommand(content: string): string | null {
@@ -823,11 +849,7 @@ function isReactableMessage(message: unknown): message is { react: (emoji: strin
 }
 
 export async function sendDiscordMessage(client: Client, channelId: string, content: string, options: OutboundMessageOptions = {}): Promise<string[]> {
-  const channel = await client.channels.fetch(channelId);
-  if (!isSendableChannel(channel) || !channel.isTextBased()) {
-    throw new Error("Discord channel not found.");
-  }
-
+  const channel = await resolveSendTargetChannel(client, channelId, options.userId);
   return sendChunks(channel, content, options);
 }
 
