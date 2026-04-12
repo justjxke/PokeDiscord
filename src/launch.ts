@@ -163,10 +163,20 @@ async function main(): Promise<void> {
       const currentWorker = worker;
       if (!currentWorker) throw new Error("Discord worker is not ready.");
       const channelId = resolveReplyChannelId(runtimeStore, meta);
+      const requestContext = meta?.bridgeRequestId
+        ? (() => {
+            try {
+              return resolveRequestContext(runtimeStore, meta.bridgeRequestId);
+            } catch {
+              return null;
+            }
+          })()
+        : null;
       const messageIds = await currentWorker.request("sendDiscordMessage", {
         channelId,
         content,
         replyToMessageId: meta?.replyToMessageId,
+        ...(requestContext?.mode === "dm" ? { userId: requestContext.discordUserId } : {}),
         attachments: meta?.attachments,
         embeds: meta?.embeds
       });
