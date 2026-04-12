@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Client } from "discord.js";
 
-import { getDiscordChannelHistory } from "./discordBot";
+import { getDiscordChannelHistory, sendDiscordMessage } from "./discordBot";
 
 test("getDiscordChannelHistory paginates before a cursor and returns pagination metadata", async () => {
   const seenFetches: Array<Record<string, unknown>> = [];
@@ -56,4 +56,39 @@ test("getDiscordChannelHistory paginates before a cursor and returns pagination 
   expect(page.nextAfterMessageId).toBe("m4");
   expect(page.hasMoreBefore).toBe(true);
   expect(page.hasMoreAfter).toBe(true);
+});
+
+test("sendDiscordMessage falls back to reopening a DM when the cached channel is unreachable", async () => {
+  const sentPayloads: Array<string | { content?: string }> = [];
+
+  const dmChannel = {
+    isTextBased: () => true,
+    send: async (payload: string | { content?: string }) => {
+      sentPayloads.push(payload);
+      return { id: "msg-dm-1" };
+    }
+  };
+
+  const client = {
+    channels: {
+      fetch: async () => {
+        throw new Error("cannot reach channel ID");
+      }
+    },
+    users: {
+      fetch: async (userId: string) => {
+        expect(userId).toBe("user-123");
+        return {
+          createDM: async () => dmChannel
+        };
+      }
+    }
+  } as unknown as Client;
+
+  const messageIds = await sendDiscordMessage(client, "dm-channel-123", "reminder fired", {
+    userId: "user-123"
+  });
+
+  expect(messageIds).toEqual(["msg-dm-1"]);
+  expect(sentPayloads).toEqual([{ content: "reminder fired" }]);
 });
