@@ -111,6 +111,7 @@ async function main(): Promise<void> {
           const payload = (request as WorkerRequestMessage<"sendDiscordMessage">).payload;
           respond(request, await sendDiscordMessage(discordClient, payload.channelId, payload.content, {
             replyToMessageId: payload.replyToMessageId,
+            userId: payload.userId,
             attachments: payload.attachments,
             embeds: payload.embeds
           }));
