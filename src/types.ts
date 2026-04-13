@@ -23,6 +23,11 @@ export interface UserBridgeState {
   encryptedPokeApiKey: EncryptedSecret | null;
 }
 
+export interface GuildProactiveConversationState {
+  activeUntil: number;
+  turnsLeft: number;
+}
+
 export interface GuildInstallationState {
   installedByUserId: string;
   installedAt: number;
@@ -30,6 +35,9 @@ export interface GuildInstallationState {
   linkedAt: number | null;
   allowedChannelIds: string[];
   encryptedPokeApiKey: EncryptedSecret | null;
+  proactiveRepliesEnabled: boolean;
+  proactiveChannelOverrides: Record<string, boolean>;
+  proactiveConversationState: Record<string, GuildProactiveConversationState>;
 }
 
 export interface BridgeConfig {

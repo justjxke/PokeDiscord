@@ -22,12 +22,18 @@ import {
 import {
   clearOwnerLink,
   clearUserLink,
+  consumeGuildProactiveConversationTurn,
+  getGuildProactiveConversationState,
   installGuildChannel,
   isGuildChannelAllowed,
+  isGuildProactiveRepliesAllowed,
   removeGuildInstallation,
   setGuildKey,
+  setGuildProactiveChannelOverride,
+  setGuildProactiveReplyMode,
   setOwnerLink,
-  setUserLink
+  setUserLink,
+  startGuildProactiveConversation
 } from "./bridgePolicy";
 import { downloadAttachmentBuffer } from "./attachmentFetch";
 import { buildDiscordRelayPrompt } from "./prompt";
@@ -55,6 +61,13 @@ const COMMAND_PREFIX = "!";
 const DM_KEY_REGEX = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const DM_SETUP_MODAL_PREFIX = "poke-dm-setup";
 const GUILD_SETUP_MODAL_PREFIX = "poke-guild-setup";
+const PROACTIVE_THREAD_TURNS = 2;
+const PROACTIVE_THREAD_WINDOW_MS = 10 * 60 * 1000;
+const POKE_CALL_OUT_PATTERN = /^\s*poke\b[,!:\-\s]*/i;
+const POKE_INLINE_PATTERN = /\bpoke\b[,!:\-\s]*/i;
+const QUESTION_INTENT_PATTERN = /(?:\?|^(?:can|could|would|should|do|does|did|is|are|am|was|were|will|may|might|what|why|how|who|where|when)\b|\b(?:anyone|someone|help|know|think)\b)/i;
+const FOLLOW_UP_INTENT_PATTERN = /^(?:and|also|so|then|okay|ok|cool|right|wait|what about|how about|why|how|can you|could you|would you|should you)\b/i;
+const DISABLE_INTENT_PATTERN = /\b(?:stop|disable|turn off|quiet|mute|shut up|don't reply|do not reply|no more replies)\b/i;
 
 function isDmMessage(message: Message): boolean {
   return message.guildId == null;
@@ -243,6 +256,89 @@ function stripBotMentions(content: string, botUserId: string): string {
   return content.replace(mentionPattern, "").trim();
 }
 
+function stripLeadingPokeCallout(content: string): string {
+  return content.replace(POKE_CALL_OUT_PATTERN, "").trim();
+}
+
+function normalizeGuildMessageText(content: string): string {
+  return content.trim().replace(/\s+/g, " ");
+}
+
+function containsQuestionIntent(content: string): boolean {
+  return QUESTION_INTENT_PATTERN.test(normalizeGuildMessageText(content));
+}
+
+function containsFollowUpIntent(content: string): boolean {
+  return FOLLOW_UP_INTENT_PATTERN.test(normalizeGuildMessageText(content));
+}
+
+function isDisableRequest(content: string): boolean {
+  return DISABLE_INTENT_PATTERN.test(normalizeGuildMessageText(content));
+}
+
+function isPokeCallout(content: string): boolean {
+  return POKE_CALL_OUT_PATTERN.test(content) || POKE_INLINE_PATTERN.test(content);
+}
+
+export interface GuildProactiveReplyDecision {
+  shouldRelay: boolean;
+  startConversation: boolean;
+  consumeConversation: boolean;
+  promptContent: string;
+  reason: "direct" | "proactive" | "followup" | "none";
+}
+
+export function evaluateGuildProactiveReply(options: {
+  content: string;
+  mentioned: boolean;
+  repliedToBot: boolean;
+  proactiveAllowed: boolean;
+  activeConversation: { activeUntil: number; turnsLeft: number; } | null;
+}): GuildProactiveReplyDecision {
+  const content = options.content;
+  const questionIntent = containsQuestionIntent(content);
+  const followUpIntent = containsFollowUpIntent(content);
+  const inConversation = Boolean(options.activeConversation && options.activeConversation.activeUntil > Date.now() && options.activeConversation.turnsLeft > 0);
+
+  if (options.mentioned || options.repliedToBot) {
+    return {
+      shouldRelay: true,
+      startConversation: true,
+      consumeConversation: false,
+      promptContent: content.trim(),
+      reason: "direct"
+    };
+  }
+
+  if (inConversation && questionIntent && followUpIntent) {
+    return {
+      shouldRelay: true,
+      startConversation: false,
+      consumeConversation: true,
+      promptContent: stripLeadingPokeCallout(content),
+      reason: "followup"
+    };
+  }
+
+  if (options.proactiveAllowed && isPokeCallout(content) && questionIntent) {
+    return {
+      shouldRelay: true,
+      startConversation: true,
+      consumeConversation: false,
+      promptContent: stripLeadingPokeCallout(content),
+      reason: "proactive"
+    };
+  }
+
+  return {
+    shouldRelay: false,
+    startConversation: false,
+    consumeConversation: false,
+    promptContent: content,
+    reason: "none"
+  };
+}
+
 async function isReplyToBotMessage(message: Message, botUserId: string): Promise<boolean> {
   const referenceId = message.reference?.messageId;
   if (!referenceId || !message.channel || !message.channel.isTextBased() || !("messages" in message.channel)) return false;
@@ -424,6 +520,26 @@ function formatGuildInstallationStatus(state: BridgeState, guildId: string): str
   return `Enabled in ${installation.allowedChannelIds.map(channelId => `<#${channelId}>`).join(", ")}.`;
 }
 
+function formatGuildProactiveStatus(state: BridgeState, guildId: string, channelId?: string): string {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return "This server is not set up yet.";
+
+  if (channelId) {
+    const mode = installation.proactiveChannelOverrides[channelId] == null
+      ? (installation.proactiveRepliesEnabled ? "inherit (enabled)" : "inherit (disabled)")
+      : (installation.proactiveChannelOverrides[channelId] ? "enabled" : "disabled");
+    const conversation = installation.proactiveConversationState[channelId];
+    const window = conversation && conversation.activeUntil > Date.now() && conversation.turnsLeft > 0
+      ? `, short thread active (${conversation.turnsLeft} turn${conversation.turnsLeft === 1 ? "" : "s"} left)`
+      : "";
+    return `Proactive replies for <#${channelId}>: ${mode}${window}.`;
+  }
+
+  const overrideCount = Object.keys(installation.proactiveChannelOverrides).length;
+  const enabled = installation.proactiveRepliesEnabled ? "on" : "off";
+  return `Proactive replies are ${enabled} for this server${overrideCount ? `, with ${overrideCount} channel override${overrideCount === 1 ? "" : "s"}` : ""}.`;
+}
+
 function formatTenantStatus(state: BridgeState, tenant: TenantReference, config: BridgeConfig): string {
   if (tenant.kind === "owner") return formatOwnerStatus(state, config);
   if (tenant.kind === "user") {
@@ -584,7 +700,22 @@ async function handleGuildMessage(message: Message, config: BridgeConfig, state:
   const tenantSecret = getTenantSecretState(state, tenant);
   const mentioned = message.mentions.users.has(botUserId);
   const repliedToBot = await isReplyToBotMessage(message, botUserId);
-  if (!mentioned && !repliedToBot) return;
+  const proactiveAllowed = isGuildProactiveRepliesAllowed(state, message.guildId, message.channelId);
+  const activeConversation = getGuildProactiveConversationState(state, message.guildId, message.channelId);
+  const decision = evaluateGuildProactiveReply({
+    content: message.content,
+    mentioned,
+    repliedToBot,
+    proactiveAllowed,
+    activeConversation
+  });
+
+  if (isDisableRequest(message.content) && (mentioned || repliedToBot || isPokeCallout(message.content))) {
+    await sendTextMessage(message.channel, "An administrator can turn off proactive replies with /poke proactive disable.");
+    return;
+  }
+
+  if (!decision.shouldRelay) return;
 
   if (!tenantSecret?.encryptedPokeApiKey) {
     await sendTextMessage(message.channel, "This server is not set up yet. An administrator should run /poke setup.");
@@ -595,10 +726,23 @@ async function handleGuildMessage(message: Message, config: BridgeConfig, state:
   Object.assign(state, rememberMessageId(state, message.id));
   await updateState(state);
 
-  const promptContent = stripBotMentions(message.content, botUserId);
+  const promptContent = mentioned ? stripBotMentions(message.content, botUserId) : decision.promptContent;
   const request = await buildDiscordRequestFromMessage(config, state, message, tenant, voiceManager, promptContent);
   request.prompt = buildDiscordRelayPrompt(request);
-  await onRelayRequest(request);
+  const result = await onRelayRequest(request);
+
+  if (result.success) {
+    if (decision.startConversation) {
+      Object.assign(state, startGuildProactiveConversation(state, message.guildId, message.channelId, PROACTIVE_THREAD_TURNS, PROACTIVE_THREAD_WINDOW_MS));
+      await updateState(state);
+      return;
+    }
+
+    if (decision.consumeConversation) {
+      Object.assign(state, consumeGuildProactiveConversationTurn(state, message.guildId, message.channelId, PROACTIVE_THREAD_WINDOW_MS));
+      await updateState(state);
+    }
+  }
 }
 
 async function registerCommands(client: Client): Promise<void> {
@@ -638,7 +782,34 @@ function createSlashCommand() {
       .setDescription("Show the current bridge status."))
     .addSubcommand(subcommand => subcommand
       .setName("reset")
-      .setDescription("Reset the current bridge link or server installation."));
+      .setDescription("Reset the current bridge link or server installation."))
+    .addSubcommandGroup(group => group
+      .setName("proactive")
+      .setDescription("Manage proactive replies in guilds.")
+      .addSubcommand(subcommand => subcommand
+        .setName("status")
+        .setDescription("Show proactive reply status for this server or channel.")
+        .addChannelOption(option => option
+          .setName("channel")
+          .setDescription("Optional channel to inspect.")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName("enable")
+        .setDescription("Enable proactive replies for this server or a channel.")
+        .addChannelOption(option => option
+          .setName("channel")
+          .setDescription("Optional channel override.")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName("disable")
+        .setDescription("Disable proactive replies for this server or a channel.")
+        .addChannelOption(option => option
+          .setName("channel")
+          .setDescription("Optional channel override.")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false))));
 
   return command.setContexts([InteractionContextType.Guild, InteractionContextType.BotDM]).setIntegrationTypes([ApplicationIntegrationType.GuildInstall]).setDMPermission(true);
 }
@@ -739,8 +910,49 @@ export async function startDiscordBot(
 
       if (!interaction.isChatInputCommand() || interaction.commandName !== COMMAND_NAME) return;
 
+      const subcommandGroup = interaction.options.getSubcommandGroup(false);
       const subcommand = interaction.options.getSubcommand();
       const tenant = interaction.inGuild() ? getTenantForGuild(interaction.guildId) : getTenantForDm(config, interaction.user.id);
+
+      if (subcommandGroup === "proactive") {
+        if (!interaction.inGuild()) {
+          await respond(interaction, "Use proactive reply settings in a server.");
+          return;
+        }
+
+        const channelOption = interaction.options.getChannel("channel");
+        const channelId = channelOption && typeof channelOption === "object" && "id" in channelOption ? channelOption.id : null;
+
+        if (subcommand === "status") {
+          await respond(interaction, formatGuildProactiveStatus(state, interaction.guildId, channelId ?? interaction.channelId));
+          return;
+        }
+
+        if (!canManageGuildInstallation(interaction)) {
+          await respond(interaction, "Only the server owner or an administrator can change proactive reply settings.");
+          return;
+        }
+
+        if (subcommand === "enable") {
+          Object.assign(state, channelId
+            ? setGuildProactiveChannelOverride(state, interaction.guildId, channelId, true)
+            : setGuildProactiveReplyMode(state, interaction.guildId, true));
+          await updateState(state);
+          await respond(interaction, channelId ? `Proactive replies enabled in <#${channelId}>.` : "Proactive replies enabled for this server.");
+          return;
+        }
+
+        if (subcommand === "disable") {
+          Object.assign(state, channelId
+            ? setGuildProactiveChannelOverride(state, interaction.guildId, channelId, false)
+            : setGuildProactiveReplyMode(state, interaction.guildId, false));
+          await updateState(state);
+          await respond(interaction, channelId ? `Proactive replies disabled in <#${channelId}>.` : "Proactive replies disabled for this server.");
+          return;
+        }
+
+        return;
+      }
 
       if (subcommand === "setup") {
         if (isTenantLinked(state, tenant)) {

@@ -1,7 +1,32 @@
 import { expect, test } from "bun:test";
 import type { Client } from "discord.js";
 
-import { getDiscordChannelHistory, sendDiscordMessage } from "./discordBot";
+import { evaluateGuildProactiveReply, getDiscordChannelHistory, sendDiscordMessage } from "./discordBot";
+import {
+  consumeGuildProactiveConversationTurn,
+  createDefaultState,
+  getGuildProactiveConversationState,
+  isGuildProactiveRepliesAllowed,
+  setGuildProactiveChannelOverride,
+  setGuildProactiveReplyMode,
+  startGuildProactiveConversation
+} from "./bridgePolicy";
+import type { BridgeState, GuildInstallationState } from "./types";
+
+function makeGuildInstallation(overrides: Partial<GuildInstallationState> = {}): GuildInstallationState {
+  return {
+    installedByUserId: "user-1",
+    installedAt: Date.now(),
+    updatedAt: Date.now(),
+    linkedAt: Date.now(),
+    allowedChannelIds: ["channel-123"],
+    encryptedPokeApiKey: null,
+    proactiveRepliesEnabled: true,
+    proactiveChannelOverrides: {},
+    proactiveConversationState: {},
+    ...overrides
+  };
+}
 
 test("getDiscordChannelHistory paginates before a cursor and returns pagination metadata", async () => {
   const seenFetches: Array<Record<string, unknown>> = [];
@@ -91,4 +116,85 @@ test("sendDiscordMessage falls back to reopening a DM when the cached channel is
 
   expect(messageIds).toEqual(["msg-dm-1"]);
   expect(sentPayloads).toEqual([{ content: "reminder fired" }]);
+});
+
+test("evaluateGuildProactiveReply accepts direct mentions and proactive callouts", () => {
+  const direct = evaluateGuildProactiveReply({
+    content: "@Poke can you help with this?",
+    mentioned: true,
+    repliedToBot: false,
+    proactiveAllowed: false,
+    activeConversation: null
+  });
+
+  expect(direct.shouldRelay).toBe(true);
+  expect(direct.startConversation).toBe(true);
+  expect(direct.reason).toBe("direct");
+
+  const proactive = evaluateGuildProactiveReply({
+    content: "Poke, what do you think about this?",
+    mentioned: false,
+    repliedToBot: false,
+    proactiveAllowed: true,
+    activeConversation: null
+  });
+
+  expect(proactive.shouldRelay).toBe(true);
+  expect(proactive.startConversation).toBe(true);
+  expect(proactive.reason).toBe("proactive");
+  expect(proactive.promptContent).toBe("what do you think about this?");
+});
+
+test("evaluateGuildProactiveReply only follows up inside an active short thread", () => {
+  const followup = evaluateGuildProactiveReply({
+    content: "and can you explain why?",
+    mentioned: false,
+    repliedToBot: false,
+    proactiveAllowed: false,
+    activeConversation: {
+      activeUntil: Date.now() + 60_000,
+      turnsLeft: 1
+    }
+  });
+
+  expect(followup.shouldRelay).toBe(true);
+  expect(followup.reason).toBe("followup");
+
+  const silent = evaluateGuildProactiveReply({
+    content: "random chatter that is not for Poke",
+    mentioned: false,
+    repliedToBot: false,
+    proactiveAllowed: true,
+    activeConversation: null
+  });
+
+  expect(silent.shouldRelay).toBe(false);
+});
+
+test("guild proactive settings support server and channel overrides with short threads", () => {
+  const state: BridgeState = createDefaultState();
+  state.guildInstallations["guild-1"] = makeGuildInstallation({
+    proactiveRepliesEnabled: false,
+    proactiveChannelOverrides: { "channel-123": true }
+  });
+
+  expect(isGuildProactiveRepliesAllowed(state, "guild-1", "channel-123")).toBe(true);
+  expect(isGuildProactiveRepliesAllowed(state, "guild-1", "channel-999")).toBe(false);
+
+  Object.assign(state, setGuildProactiveReplyMode(state, "guild-1", true));
+  expect(isGuildProactiveRepliesAllowed(state, "guild-1", "channel-999")).toBe(true);
+
+  Object.assign(state, setGuildProactiveChannelOverride(state, "guild-1", "channel-999", false));
+  expect(isGuildProactiveRepliesAllowed(state, "guild-1", "channel-999")).toBe(false);
+
+  Object.assign(state, startGuildProactiveConversation(state, "guild-1", "channel-123", 2, 60_000));
+  const conversation = getGuildProactiveConversationState(state, "guild-1", "channel-123");
+  expect(conversation?.turnsLeft).toBe(2);
+  expect(conversation?.activeUntil).toBeGreaterThan(Date.now());
+
+  Object.assign(state, consumeGuildProactiveConversationTurn(state, "guild-1", "channel-123", 60_000));
+  expect(getGuildProactiveConversationState(state, "guild-1", "channel-123")?.turnsLeft).toBe(1);
+
+  Object.assign(state, consumeGuildProactiveConversationTurn(state, "guild-1", "channel-123", 60_000));
+  expect(getGuildProactiveConversationState(state, "guild-1", "channel-123")).toBeNull();
 });
