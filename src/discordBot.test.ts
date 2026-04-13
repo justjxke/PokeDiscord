@@ -171,6 +171,50 @@ test("evaluateGuildProactiveReply only follows up inside an active short thread"
   expect(silent.shouldRelay).toBe(false);
 });
 
+test("evaluateGuildProactiveReply can trigger from nearby context without an explicit mention", () => {
+  const now = Date.now();
+  const decision = evaluateGuildProactiveReply({
+    content: "can you explain why that happened?",
+    mentioned: false,
+    repliedToBot: false,
+    proactiveAllowed: true,
+    activeConversation: null,
+    botUserId: "bot-1",
+    messageTimestamp: new Date(now).toISOString(),
+    channelContext: [
+      { authorId: "user-1", authorName: "A", content: "hey Poke what do you think", timestamp: new Date(now - 3 * 60_000).toISOString(), attachments: [] },
+      { authorId: "bot-1", authorName: "Poke", content: "here's what I think", timestamp: new Date(now - 2 * 60_000).toISOString(), attachments: [] },
+      { authorId: "user-1", authorName: "A", content: "that makes sense, but why?", timestamp: new Date(now - 45_000).toISOString(), attachments: [] },
+      { authorId: "user-1", authorName: "A", content: "can you explain why that happened?", timestamp: new Date(now).toISOString(), attachments: [] }
+    ]
+  });
+
+  expect(decision.shouldRelay).toBe(true);
+  expect(decision.reason).toBe("proactive");
+});
+
+test("evaluateGuildProactiveReply ignores stale context after a topic shift", () => {
+  const now = Date.now();
+  const decision = evaluateGuildProactiveReply({
+    content: "can you help with this?",
+    mentioned: false,
+    repliedToBot: false,
+    proactiveAllowed: true,
+    activeConversation: null,
+    botUserId: "bot-1",
+    messageTimestamp: new Date(now).toISOString(),
+    channelContext: [
+      { authorId: "user-1", authorName: "A", content: "Poke can you review this", timestamp: new Date(now - 20 * 60_000).toISOString(), attachments: [] },
+      { authorId: "bot-1", authorName: "Poke", content: "sure", timestamp: new Date(now - 19 * 60_000).toISOString(), attachments: [] },
+      { authorId: "user-2", authorName: "B", content: "anyway did you see the game last night", timestamp: new Date(now - 18 * 60_000).toISOString(), attachments: [] },
+      { authorId: "user-3", authorName: "C", content: "lol yeah", timestamp: new Date(now - 17 * 60_000).toISOString(), attachments: [] },
+      { authorId: "user-4", authorName: "D", content: "can you help with this?", timestamp: new Date(now).toISOString(), attachments: [] }
+    ]
+  });
+
+  expect(decision.shouldRelay).toBe(false);
+});
+
 test("guild proactive settings support server and channel overrides with short threads", () => {
   const state: BridgeState = createDefaultState();
   state.guildInstallations["guild-1"] = makeGuildInstallation({

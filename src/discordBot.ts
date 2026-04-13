@@ -63,6 +63,8 @@ const DM_SETUP_MODAL_PREFIX = "poke-dm-setup";
 const GUILD_SETUP_MODAL_PREFIX = "poke-guild-setup";
 const PROACTIVE_THREAD_TURNS = 2;
 const PROACTIVE_THREAD_WINDOW_MS = 10 * 60 * 1000;
+const PROACTIVE_CONTEXT_WINDOW_MS = 15 * 60 * 1000;
+const PROACTIVE_CONTEXT_RECENT_MESSAGE_LIMIT = 8;
 const POKE_CALL_OUT_PATTERN = /^\s*poke\b[,!:\-\s]*/i;
 const POKE_INLINE_PATTERN = /\bpoke\b[,!:\-\s]*/i;
 const QUESTION_INTENT_PATTERN = /(?:\?|^(?:can|could|would|should|do|does|did|is|are|am|was|were|will|may|might|what|why|how|who|where|when)\b|\b(?:anyone|someone|help|know|think)\b)/i;
@@ -280,6 +282,93 @@ function isPokeCallout(content: string): boolean {
   return POKE_CALL_OUT_PATTERN.test(content) || POKE_INLINE_PATTERN.test(content);
 }
 
+const TOPIC_STOP_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "what", "about", "can", "could", "would", "should",
+  "you", "your", "are", "is", "was", "were", "be", "to", "of", "in", "on", "it", "me", "we",
+  "they", "them", "i", "a", "an", "or", "if", "at", "as", "do", "did", "does", "help", "think",
+  "know", "please", "yeah", "yes", "no", "ok", "okay", "right", "then", "so", "and", "also", "why",
+  "how", "who", "when", "where", "can", "could", "would", "should", "anyone", "someone"
+]);
+
+function normalizeTopicText(content: string): string {
+  return content.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function extractTopicTokens(content: string): string[] {
+  return normalizeTopicText(content)
+    .split(" ")
+    .map(token => token.trim())
+    .filter(token => token.length > 2 && !TOPIC_STOP_WORDS.has(token));
+}
+
+function collectTopicTokens(messages: DiscordMessageContext[]): Set<string> {
+  const tokens = new Set<string>();
+  for (const message of messages) {
+    for (const token of extractTopicTokens(message.content)) {
+      tokens.add(token);
+    }
+  }
+  return tokens;
+}
+
+function similarityScore(left: Set<string>, right: Set<string>): number {
+  if (!left.size || !right.size) return 0;
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) overlap++;
+  }
+  return overlap / Math.max(left.size, right.size);
+}
+
+function hasRecentPokeReference(messages: DiscordMessageContext[], botUserId: string): boolean {
+  return messages.some(message => message.authorId === botUserId || isPokeCallout(message.content));
+}
+
+function assessContextSignal(options: {
+  content: string;
+  messageTimestamp?: string;
+  channelContext?: DiscordMessageContext[];
+  botUserId?: string;
+}): { score: number; topicShift: boolean; } {
+  const context = options.channelContext?.slice(-PROACTIVE_CONTEXT_RECENT_MESSAGE_LIMIT) ?? [];
+  const history = context.slice(0, -1);
+  if (!history.length || !options.botUserId) return { score: 0, topicShift: false };
+
+  const currentAt = options.messageTimestamp ? Date.parse(options.messageTimestamp) : Date.now();
+  const lastBotIndex = [...history].reverse().findIndex(message => message.authorId === options.botUserId);
+  if (lastBotIndex === -1) return { score: 0, topicShift: false };
+
+  const lastBotMessage = history[history.length - 1 - lastBotIndex];
+  const lastBotAt = Date.parse(lastBotMessage.timestamp);
+  const timeSinceLastBot = currentAt - lastBotAt;
+  if (!Number.isFinite(timeSinceLastBot) || timeSinceLastBot < 0) return { score: 0, topicShift: false };
+
+  const messagesAfterBot = history.slice(history.length - lastBotIndex);
+  if (!messagesAfterBot.length) return { score: 0, topicShift: false };
+
+  const recentWindow = currentAt - Date.parse(messagesAfterBot[0]?.timestamp ?? lastBotMessage.timestamp);
+  const currentTokens = new Set(extractTopicTokens(options.content));
+  const contextTokens = collectTopicTokens(messagesAfterBot.filter(message => message.authorId !== options.botUserId));
+  const overlap = similarityScore(currentTokens, contextTokens);
+  const followUpIntent = containsFollowUpIntent(options.content);
+  const questionIntent = containsQuestionIntent(options.content);
+  const pokeReferenced = hasRecentPokeReference(messagesAfterBot, options.botUserId);
+
+  let score = 0;
+  if (timeSinceLastBot <= PROACTIVE_CONTEXT_WINDOW_MS) score += 2;
+  if (recentWindow <= PROACTIVE_CONTEXT_WINDOW_MS / 2) score += 1;
+  if (overlap >= 0.2) score += 1.5;
+  if (followUpIntent) score += 1;
+  if (questionIntent) score += 1;
+  if (pokeReferenced) score += 0.5;
+
+  const topicShift = messagesAfterBot.length >= 3 && overlap < 0.12 && !pokeReferenced && !followUpIntent;
+  if (topicShift) score -= 2.5;
+  if (timeSinceLastBot > PROACTIVE_CONTEXT_WINDOW_MS) score -= 1.5;
+
+  return { score, topicShift };
+}
+
 export interface GuildProactiveReplyDecision {
   shouldRelay: boolean;
   startConversation: boolean;
@@ -294,11 +383,21 @@ export function evaluateGuildProactiveReply(options: {
   repliedToBot: boolean;
   proactiveAllowed: boolean;
   activeConversation: { activeUntil: number; turnsLeft: number; } | null;
+  channelContext?: DiscordMessageContext[];
+  botUserId?: string;
+  messageTimestamp?: string;
 }): GuildProactiveReplyDecision {
   const content = options.content;
   const questionIntent = containsQuestionIntent(content);
   const followUpIntent = containsFollowUpIntent(content);
   const inConversation = Boolean(options.activeConversation && options.activeConversation.activeUntil > Date.now() && options.activeConversation.turnsLeft > 0);
+  const explicitCallout = isPokeCallout(content);
+  const contextSignal = assessContextSignal({
+    content,
+    messageTimestamp: options.messageTimestamp,
+    channelContext: options.channelContext,
+    botUserId: options.botUserId
+  });
 
   if (options.mentioned || options.repliedToBot) {
     return {
@@ -320,13 +419,23 @@ export function evaluateGuildProactiveReply(options: {
     };
   }
 
-  if (options.proactiveAllowed && isPokeCallout(content) && questionIntent) {
+  if (options.proactiveAllowed && explicitCallout && questionIntent) {
     return {
       shouldRelay: true,
       startConversation: true,
       consumeConversation: false,
       promptContent: stripLeadingPokeCallout(content),
       reason: "proactive"
+    };
+  }
+
+  if (options.proactiveAllowed && !explicitCallout && !contextSignal.topicShift && questionIntent && contextSignal.score >= 4) {
+    return {
+      shouldRelay: true,
+      startConversation: true,
+      consumeConversation: false,
+      promptContent: content.trim(),
+      reason: contextSignal.topicShift ? "none" : "proactive"
     };
   }
 
@@ -587,10 +696,11 @@ async function buildDiscordRequestFromMessage(
   message: Message,
   tenant: TenantReference,
   voiceManager: VoiceManager,
-  promptContent = message.content
+  promptContent = message.content,
+  contextMessagesOverride?: DiscordMessageContext[]
 ): Promise<DiscordRelayRequest> {
   const attachments = getMessageAttachments(message);
-  const contextMessages = message.guildId == null ? [] : await collectChannelContext(message.channel, config.contextMessageCount);
+  const contextMessages = contextMessagesOverride ?? (message.guildId == null ? [] : await collectChannelContext(message.channel, config.contextMessageCount));
   const replyTarget = buildReplyTarget(message.channelId, isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel), isDmMessage(message) ? "dm" : "guild");
 
   return {
@@ -702,12 +812,16 @@ async function handleGuildMessage(message: Message, config: BridgeConfig, state:
   const repliedToBot = await isReplyToBotMessage(message, botUserId);
   const proactiveAllowed = isGuildProactiveRepliesAllowed(state, message.guildId, message.channelId);
   const activeConversation = getGuildProactiveConversationState(state, message.guildId, message.channelId);
+  const contextMessages = await collectChannelContext(message.channel, Math.max(config.contextMessageCount, PROACTIVE_CONTEXT_RECENT_MESSAGE_LIMIT));
   const decision = evaluateGuildProactiveReply({
     content: message.content,
     mentioned,
     repliedToBot,
     proactiveAllowed,
-    activeConversation
+    activeConversation,
+    channelContext: contextMessages,
+    botUserId,
+    messageTimestamp: new Date(message.createdTimestamp).toISOString()
   });
 
   if (isDisableRequest(message.content) && (mentioned || repliedToBot || isPokeCallout(message.content))) {
@@ -727,7 +841,7 @@ async function handleGuildMessage(message: Message, config: BridgeConfig, state:
   await updateState(state);
 
   const promptContent = mentioned ? stripBotMentions(message.content, botUserId) : decision.promptContent;
-  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, voiceManager, promptContent);
+  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, voiceManager, promptContent, contextMessages);
   request.prompt = buildDiscordRelayPrompt(request);
   const result = await onRelayRequest(request);
 
