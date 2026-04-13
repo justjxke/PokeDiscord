@@ -51,8 +51,12 @@ For a server:
   - `/poke setup`
   - `/poke status`
   - `/poke reset`
+  - `/poke proactive status`
+  - `/poke proactive enable`
+  - `/poke proactive disable`
 
 ## Notes
 
 - Poke will refuse to answer personal questions about who owns the API key or who is initially linked to the bot when used in guilds.
 - The "Poke is typing..." is emulated and not actually Poke typing/thinking, until Interaction adds a way to see when Poke is working, this is emulated.
+- Guilds can keep proactive replies on by default, but admins can disable them per server or per channel with `/poke proactive disable`.

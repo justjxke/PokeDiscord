@@ -18,6 +18,39 @@ function readStringArray(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map(entry => entry.trim());
 }
 
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readProactiveChannelOverrides(value: unknown): Record<string, boolean> {
+  if (!isRecord(value)) return {};
+
+  const overrides: Record<string, boolean> = {};
+  for (const [channelId, entry] of Object.entries(value)) {
+    if (typeof entry === "boolean") overrides[channelId] = entry;
+  }
+
+  return overrides;
+}
+
+function readProactiveConversationState(value: unknown): Record<string, { activeUntil: number; turnsLeft: number; }> {
+  if (!isRecord(value)) return {};
+
+  const conversations: Record<string, { activeUntil: number; turnsLeft: number; }> = {};
+  for (const [channelId, entry] of Object.entries(value)) {
+    if (!isRecord(entry)) continue;
+    const activeUntil = typeof entry.activeUntil === "number" ? entry.activeUntil : 0;
+    const turnsLeft = typeof entry.turnsLeft === "number" ? entry.turnsLeft : 0;
+    if (activeUntil <= 0 || turnsLeft <= 0) continue;
+    conversations[channelId] = { activeUntil, turnsLeft };
+  }
+
+  return conversations;
+}
+
+const DEFAULT_PROACTIVE_TURNS = 2;
+const DEFAULT_PROACTIVE_WINDOW_MS = 10 * 60 * 1000;
+
 function readEncryptedSecret(value: unknown): EncryptedSecret | null {
   if (!isRecord(value)) return null;
   if (value.algorithm !== "aes-256-gcm") return null;
@@ -90,6 +123,9 @@ function normalizeGuildInstallation(value: unknown, stateSecret: string): GuildI
   const allowedChannelIds = readStringArray(value.allowedChannelIds);
   const encryptedPokeApiKey = readEncryptedSecret(value.encryptedPokeApiKey)
     ?? migrateLegacySecret(value.pokeApiKey, stateSecret, linkedAt ?? installedAt);
+  const proactiveRepliesEnabled = readBoolean(value.proactiveRepliesEnabled, true);
+  const proactiveChannelOverrides = readProactiveChannelOverrides(value.proactiveChannelOverrides ?? value.proactiveChannelIds);
+  const proactiveConversationState = readProactiveConversationState(value.proactiveConversationState);
 
   if (!installedByUserId) return null;
 
@@ -99,7 +135,10 @@ function normalizeGuildInstallation(value: unknown, stateSecret: string): GuildI
     updatedAt,
     linkedAt,
     allowedChannelIds,
-    encryptedPokeApiKey
+    encryptedPokeApiKey,
+    proactiveRepliesEnabled,
+    proactiveChannelOverrides,
+    proactiveConversationState
   };
 }
 
@@ -211,6 +250,18 @@ export function assertPersistedStateShape(raw: unknown): void {
       }
       assertOptionalString(value.pokeApiKey, `guildInstallations.${guildId}.pokeApiKey`);
       assertEncryptedSecretShape(value.encryptedPokeApiKey, `guildInstallations.${guildId}.encryptedPokeApiKey`);
+      if (value.proactiveRepliesEnabled != null && typeof value.proactiveRepliesEnabled !== "boolean") {
+        throw new Error(`guildInstallations.${guildId}.proactiveRepliesEnabled must be a boolean when present.`);
+      }
+      if (value.proactiveChannelOverrides != null && !isRecord(value.proactiveChannelOverrides)) {
+        throw new Error(`guildInstallations.${guildId}.proactiveChannelOverrides must be an object when present.`);
+      }
+      if (isRecord(value.proactiveChannelOverrides) && Object.values(value.proactiveChannelOverrides).some(entry => typeof entry !== "boolean")) {
+        throw new Error(`guildInstallations.${guildId}.proactiveChannelOverrides must contain only booleans.`);
+      }
+      if (value.proactiveConversationState != null && !isRecord(value.proactiveConversationState)) {
+        throw new Error(`guildInstallations.${guildId}.proactiveConversationState must be an object when present.`);
+      }
     }
   }
 
@@ -326,7 +377,10 @@ export function installGuildChannel(state: BridgeState, guildId: string, install
         updatedAt: Date.now(),
         linkedAt: existing?.linkedAt ?? Date.now(),
         allowedChannelIds: nextAllowedChannelIds,
-        encryptedPokeApiKey
+        encryptedPokeApiKey,
+        proactiveRepliesEnabled: existing?.proactiveRepliesEnabled ?? true,
+        proactiveChannelOverrides: existing?.proactiveChannelOverrides ?? {},
+        proactiveConversationState: existing?.proactiveConversationState ?? {}
       }
     }
   };
@@ -345,7 +399,10 @@ export function setGuildKey(state: BridgeState, guildId: string, installedByUser
           updatedAt: Date.now(),
           linkedAt: Date.now(),
           allowedChannelIds: [],
-          encryptedPokeApiKey
+          encryptedPokeApiKey,
+          proactiveRepliesEnabled: true,
+          proactiveChannelOverrides: {},
+          proactiveConversationState: {}
         }
       }
     };
@@ -360,7 +417,10 @@ export function setGuildKey(state: BridgeState, guildId: string, installedByUser
         installedByUserId,
         updatedAt: Date.now(),
         linkedAt: existing.linkedAt ?? Date.now(),
-        encryptedPokeApiKey
+        encryptedPokeApiKey,
+        proactiveRepliesEnabled: existing.proactiveRepliesEnabled ?? true,
+        proactiveChannelOverrides: existing.proactiveChannelOverrides ?? {},
+        proactiveConversationState: existing.proactiveConversationState ?? {}
       }
     }
   };
@@ -383,6 +443,121 @@ export function isGuildChannelAllowed(state: BridgeState, guildId: string, chann
   if (!installation) return false;
   if (!installation.allowedChannelIds.length) return false;
   return installation.allowedChannelIds.includes(channelId);
+}
+
+export type ProactiveReplyChannelMode = "inherit" | "enabled" | "disabled";
+
+export function getGuildProactiveReplyMode(state: BridgeState, guildId: string, channelId: string): ProactiveReplyChannelMode {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return "disabled";
+  const override = installation.proactiveChannelOverrides[channelId];
+  if (typeof override === "boolean") return override ? "enabled" : "disabled";
+  return installation.proactiveRepliesEnabled ? "enabled" : "disabled";
+}
+
+export function isGuildProactiveRepliesAllowed(state: BridgeState, guildId: string, channelId: string): boolean {
+  return getGuildProactiveReplyMode(state, guildId, channelId) === "enabled";
+}
+
+export function getGuildProactiveConversationState(state: BridgeState, guildId: string, channelId: string): { activeUntil: number; turnsLeft: number; } | null {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return null;
+  const conversation = installation.proactiveConversationState[channelId];
+  if (!conversation) return null;
+  if (conversation.activeUntil <= Date.now() || conversation.turnsLeft <= 0) return null;
+  return conversation;
+}
+
+export function setGuildProactiveReplyMode(state: BridgeState, guildId: string, enabled: boolean): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        proactiveRepliesEnabled: enabled
+      }
+    }
+  };
+}
+
+export function setGuildProactiveChannelOverride(state: BridgeState, guildId: string, channelId: string, enabled: boolean | null): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+  const proactiveChannelOverrides = { ...(installation.proactiveChannelOverrides ?? {}) };
+  if (enabled == null) {
+    delete proactiveChannelOverrides[channelId];
+  } else {
+    proactiveChannelOverrides[channelId] = enabled;
+  }
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        proactiveChannelOverrides
+      }
+    }
+  };
+}
+
+export function startGuildProactiveConversation(state: BridgeState, guildId: string, channelId: string, turnsLeft = DEFAULT_PROACTIVE_TURNS, durationMs = DEFAULT_PROACTIVE_WINDOW_MS): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+  const proactiveConversationState = { ...(installation.proactiveConversationState ?? {}) };
+  proactiveConversationState[channelId] = {
+    activeUntil: Date.now() + durationMs,
+    turnsLeft
+  };
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        proactiveConversationState
+      }
+    }
+  };
+}
+
+export function consumeGuildProactiveConversationTurn(state: BridgeState, guildId: string, channelId: string, durationMs = DEFAULT_PROACTIVE_WINDOW_MS): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+  const conversation = installation.proactiveConversationState[channelId];
+  if (!conversation) return state;
+
+  const nextTurnsLeft = Math.max(conversation.turnsLeft - 1, 0);
+  const proactiveConversationState = { ...(installation.proactiveConversationState ?? {}) };
+  if (nextTurnsLeft <= 0) {
+    delete proactiveConversationState[channelId];
+  } else {
+    proactiveConversationState[channelId] = {
+      activeUntil: Date.now() + durationMs,
+      turnsLeft: nextTurnsLeft
+    };
+  }
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        proactiveConversationState
+      }
+    }
+  };
 }
 
 export function buildPromptGuardrails(): string[] {
