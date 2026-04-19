@@ -805,7 +805,7 @@ function buildSettingsPanelComponents(state: BridgeState, tenant: TenantReferenc
     ...tabs.map(tab => new ButtonBuilder()
       .setCustomId(buildSettingsCustomId(tab, "switch", targetChannelId))
       .setLabel(buildSettingsSectionTitle(tab))
-      .setStyle(tab === section ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      .setStyle(tab === "danger" ? ButtonStyle.Danger : (tab === section ? ButtonStyle.Primary : ButtonStyle.Secondary))
       .setDisabled(isGuildContext ? tab === "account" : tab !== "overview" && tab !== "account" && tab !== "danger"))
   );
 
