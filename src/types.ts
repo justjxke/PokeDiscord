@@ -35,6 +35,8 @@ export interface GuildInstallationState {
   linkedAt: number | null;
   allowedChannelIds: string[];
   encryptedPokeApiKey: EncryptedSecret | null;
+  guildUnrestrictedRepliesEnabled: boolean;
+  guildUnrestrictedChannelOverrides: Record<string, boolean>;
   proactiveRepliesEnabled: boolean;
   proactiveChannelOverrides: Record<string, boolean>;
   proactiveConversationState: Record<string, GuildProactiveConversationState>;
@@ -206,6 +208,7 @@ export interface DiscordRelayRequest {
   mode: "dm" | "guild";
   prompt: string;
   replyTarget: DiscordReplyTarget;
+  guildUnrestrictedRepliesEnabled?: boolean;
   attachments: DiscordAttachmentContext[];
   contextMessages: DiscordMessageContext[];
   voiceContext: DiscordVoiceContext | null;

@@ -33,6 +33,17 @@ function readProactiveChannelOverrides(value: unknown): Record<string, boolean> 
   return overrides;
 }
 
+function readGuildUnrestrictedChannelOverrides(value: unknown): Record<string, boolean> {
+  if (!isRecord(value)) return {};
+
+  const overrides: Record<string, boolean> = {};
+  for (const [channelId, entry] of Object.entries(value)) {
+    if (typeof entry === "boolean") overrides[channelId] = entry;
+  }
+
+  return overrides;
+}
+
 function readProactiveConversationState(value: unknown): Record<string, { activeUntil: number; turnsLeft: number; }> {
   if (!isRecord(value)) return {};
 
@@ -123,6 +134,8 @@ function normalizeGuildInstallation(value: unknown, stateSecret: string): GuildI
   const allowedChannelIds = readStringArray(value.allowedChannelIds);
   const encryptedPokeApiKey = readEncryptedSecret(value.encryptedPokeApiKey)
     ?? migrateLegacySecret(value.pokeApiKey, stateSecret, linkedAt ?? installedAt);
+  const guildUnrestrictedRepliesEnabled = readBoolean(value.guildUnrestrictedRepliesEnabled, false);
+  const guildUnrestrictedChannelOverrides = readGuildUnrestrictedChannelOverrides(value.guildUnrestrictedChannelOverrides);
   const proactiveRepliesEnabled = readBoolean(value.proactiveRepliesEnabled, true);
   const proactiveChannelOverrides = readProactiveChannelOverrides(value.proactiveChannelOverrides ?? value.proactiveChannelIds);
   const proactiveConversationState = readProactiveConversationState(value.proactiveConversationState);
@@ -136,6 +149,8 @@ function normalizeGuildInstallation(value: unknown, stateSecret: string): GuildI
     linkedAt,
     allowedChannelIds,
     encryptedPokeApiKey,
+    guildUnrestrictedRepliesEnabled,
+    guildUnrestrictedChannelOverrides,
     proactiveRepliesEnabled,
     proactiveChannelOverrides,
     proactiveConversationState
@@ -250,6 +265,15 @@ export function assertPersistedStateShape(raw: unknown): void {
       }
       assertOptionalString(value.pokeApiKey, `guildInstallations.${guildId}.pokeApiKey`);
       assertEncryptedSecretShape(value.encryptedPokeApiKey, `guildInstallations.${guildId}.encryptedPokeApiKey`);
+      if (value.guildUnrestrictedRepliesEnabled != null && typeof value.guildUnrestrictedRepliesEnabled !== "boolean") {
+        throw new Error(`guildInstallations.${guildId}.guildUnrestrictedRepliesEnabled must be a boolean when present.`);
+      }
+      if (value.guildUnrestrictedChannelOverrides != null && !isRecord(value.guildUnrestrictedChannelOverrides)) {
+        throw new Error(`guildInstallations.${guildId}.guildUnrestrictedChannelOverrides must be an object when present.`);
+      }
+      if (isRecord(value.guildUnrestrictedChannelOverrides) && Object.values(value.guildUnrestrictedChannelOverrides).some(entry => typeof entry !== "boolean")) {
+        throw new Error(`guildInstallations.${guildId}.guildUnrestrictedChannelOverrides must contain only booleans.`);
+      }
       if (value.proactiveRepliesEnabled != null && typeof value.proactiveRepliesEnabled !== "boolean") {
         throw new Error(`guildInstallations.${guildId}.proactiveRepliesEnabled must be a boolean when present.`);
       }
@@ -378,6 +402,8 @@ export function installGuildChannel(state: BridgeState, guildId: string, install
         linkedAt: existing?.linkedAt ?? Date.now(),
         allowedChannelIds: nextAllowedChannelIds,
         encryptedPokeApiKey,
+        guildUnrestrictedRepliesEnabled: existing?.guildUnrestrictedRepliesEnabled ?? false,
+        guildUnrestrictedChannelOverrides: existing?.guildUnrestrictedChannelOverrides ?? {},
         proactiveRepliesEnabled: existing?.proactiveRepliesEnabled ?? true,
         proactiveChannelOverrides: existing?.proactiveChannelOverrides ?? {},
         proactiveConversationState: existing?.proactiveConversationState ?? {}
@@ -400,6 +426,8 @@ export function setGuildKey(state: BridgeState, guildId: string, installedByUser
           linkedAt: Date.now(),
           allowedChannelIds: [],
           encryptedPokeApiKey,
+          guildUnrestrictedRepliesEnabled: false,
+          guildUnrestrictedChannelOverrides: {},
           proactiveRepliesEnabled: true,
           proactiveChannelOverrides: {},
           proactiveConversationState: {}
@@ -418,6 +446,8 @@ export function setGuildKey(state: BridgeState, guildId: string, installedByUser
         updatedAt: Date.now(),
         linkedAt: existing.linkedAt ?? Date.now(),
         encryptedPokeApiKey,
+        guildUnrestrictedRepliesEnabled: existing.guildUnrestrictedRepliesEnabled ?? false,
+        guildUnrestrictedChannelOverrides: existing.guildUnrestrictedChannelOverrides ?? {},
         proactiveRepliesEnabled: existing.proactiveRepliesEnabled ?? true,
         proactiveChannelOverrides: existing.proactiveChannelOverrides ?? {},
         proactiveConversationState: existing.proactiveConversationState ?? {}
@@ -441,8 +471,86 @@ export function removeGuildInstallation(state: BridgeState, guildId: string): Br
 export function isGuildChannelAllowed(state: BridgeState, guildId: string, channelId: string): boolean {
   const installation = state.guildInstallations[guildId];
   if (!installation) return false;
+  if (isGuildUnrestrictedRepliesAllowed(state, guildId, channelId)) return true;
   if (!installation.allowedChannelIds.length) return false;
   return installation.allowedChannelIds.includes(channelId);
+}
+
+export type UnrestrictedReplyChannelMode = "inherit" | "enabled" | "disabled";
+
+export function getGuildUnrestrictedReplyMode(state: BridgeState, guildId: string, channelId: string): UnrestrictedReplyChannelMode {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return "disabled";
+  const override = installation.guildUnrestrictedChannelOverrides[channelId];
+  if (typeof override === "boolean") return override ? "enabled" : "disabled";
+  return installation.guildUnrestrictedRepliesEnabled ? "enabled" : "disabled";
+}
+
+export function isGuildUnrestrictedRepliesAllowed(state: BridgeState, guildId: string, channelId: string): boolean {
+  return getGuildUnrestrictedReplyMode(state, guildId, channelId) === "enabled";
+}
+
+export function setGuildUnrestrictedReplyMode(state: BridgeState, guildId: string, enabled: boolean): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        guildUnrestrictedRepliesEnabled: enabled
+      }
+    }
+  };
+}
+
+export function setGuildUnrestrictedChannelOverride(state: BridgeState, guildId: string, channelId: string, enabled: boolean | null): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+  const guildUnrestrictedChannelOverrides = { ...(installation.guildUnrestrictedChannelOverrides ?? {}) };
+  if (enabled == null) {
+    delete guildUnrestrictedChannelOverrides[channelId];
+  } else {
+    guildUnrestrictedChannelOverrides[channelId] = enabled;
+  }
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        guildUnrestrictedChannelOverrides
+      }
+    }
+  };
+}
+
+export function setGuildChannelAccess(state: BridgeState, guildId: string, channelId: string, enabled: boolean): BridgeState {
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return state;
+  const allowedChannelIds = new Set(installation.allowedChannelIds);
+  if (enabled) {
+    allowedChannelIds.add(channelId);
+  } else {
+    allowedChannelIds.delete(channelId);
+  }
+
+  return {
+    ...state,
+    guildInstallations: {
+      ...state.guildInstallations,
+      [guildId]: {
+        ...installation,
+        updatedAt: Date.now(),
+        allowedChannelIds: Array.from(allowedChannelIds)
+      }
+    }
+  };
 }
 
 export type ProactiveReplyChannelMode = "inherit" | "enabled" | "disabled";
@@ -560,7 +668,15 @@ export function consumeGuildProactiveConversationTurn(state: BridgeState, guildI
   };
 }
 
-export function buildPromptGuardrails(): string[] {
+export function buildPromptGuardrails(options: { guildUnrestricted?: boolean; } = {}): string[] {
+  if (options.guildUnrestricted) {
+    return [
+      "keep the voice casual, natural, and a little playful.",
+      "do not narrate that you are checking anything behind the scenes.",
+      "only use information that appears in this request or the attached Discord context."
+    ];
+  }
+
   return [
     "keep the voice casual, natural, and a little playful.",
     "if you need to refuse, keep it short and simple: 'dunno', 'not sure!', or 'can't help with that' are better than long explanations.",

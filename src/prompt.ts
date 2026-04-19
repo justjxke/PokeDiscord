@@ -9,6 +9,11 @@ const GUILD_PREFACE = [
   "If the user asks for music or voice playback, use Spotify-first discovery when they only name an artist or give a vague request, and pass queueVoiceTrack an artist plus optional query. If you already have a concrete playable link, pass url instead. The bridge will avoid repeating recent artist picks, resolve a playable version, and ask for a direct link only if nothing playable is found."
 ].join(" ");
 
+const GUILD_UNRESTRICTED_PREFACE = [
+  "You're chatting in a trusted private server.",
+  "Answer naturally and directly using the request and attached Discord context."
+].join(" ");
+
 const DM_PREFACE = [
   "This is a direct message.",
   "Keep the same natural voice, and feel free to help with private setup and personal-use details while still avoiding revealing anything about other people."
@@ -57,7 +62,7 @@ function formatVoiceContext(request: DiscordRelayRequest): string[] {
 }
 
 function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest): string {
-  const lines: (string | null)[] = [preface, "You are responding to a Discord bridge request.", ...buildPromptGuardrails()];
+  const lines: (string | null)[] = [preface, "You are responding to a Discord bridge request.", ...buildPromptGuardrails({ guildUnrestricted: request?.guildUnrestrictedRepliesEnabled ?? false })];
 
   if (request) {
     lines.push(
@@ -70,7 +75,7 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       `Discord user id: ${request.discordUserId}`,
       `Discord channel id: ${request.discordChannelId}`,
       `Message id: ${request.discordMessageId}`,
-      request.mode === "guild" ? "Treat guild conversations as server-scoped and follow the server's configured channels." : null,
+      request.mode === "guild" && !request.guildUnrestrictedRepliesEnabled ? "Treat guild conversations as server-scoped and follow the server's configured channels." : null,
       "",
       "User message:",
       request.prompt.trim(),
@@ -102,6 +107,8 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
 }
 
 export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
-  const preface = request.mode === "guild" ? GUILD_PREFACE : DM_PREFACE;
+  const preface = request.mode === "guild"
+    ? (request.guildUnrestrictedRepliesEnabled ? GUILD_UNRESTRICTED_PREFACE : GUILD_PREFACE)
+    : DM_PREFACE;
   return buildPromptWithPreface(preface, request);
 }

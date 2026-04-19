@@ -6,6 +6,8 @@ import {
   AttachmentBuilder,
   ChannelType,
   Client,
+  ButtonBuilder,
+  ButtonStyle,
   EmbedBuilder,
   GatewayIntentBits,
   InteractionContextType,
@@ -14,6 +16,7 @@ import {
   SlashCommandBuilder,
   TextInputBuilder,
   TextInputStyle,
+  type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Message,
   type ModalSubmitInteraction
@@ -24,13 +27,18 @@ import {
   clearUserLink,
   consumeGuildProactiveConversationTurn,
   getGuildProactiveConversationState,
+  getGuildUnrestrictedReplyMode,
   installGuildChannel,
   isGuildChannelAllowed,
   isGuildProactiveRepliesAllowed,
+  isGuildUnrestrictedRepliesAllowed,
   removeGuildInstallation,
   setGuildKey,
+  setGuildChannelAccess,
   setGuildProactiveChannelOverride,
   setGuildProactiveReplyMode,
+  setGuildUnrestrictedChannelOverride,
+  setGuildUnrestrictedReplyMode,
   setOwnerLink,
   setUserLink,
   startGuildProactiveConversation
@@ -70,6 +78,9 @@ const POKE_INLINE_PATTERN = /\bpoke\b[,!:\-\s]*/i;
 const QUESTION_INTENT_PATTERN = /(?:\?|^(?:can|could|would|should|do|does|did|is|are|am|was|were|will|may|might|what|why|how|who|where|when)\b|\b(?:anyone|someone|help|know|think)\b)/i;
 const FOLLOW_UP_INTENT_PATTERN = /^(?:and|also|so|then|okay|ok|cool|right|wait|what about|how about|why|how|can you|could you|would you|should you)\b/i;
 const DISABLE_INTENT_PATTERN = /\b(?:stop|disable|turn off|quiet|mute|shut up|don't reply|do not reply|no more replies)\b/i;
+const SETTINGS_MODAL_PREFIX = "poke-settings";
+
+type SettingsSection = "overview" | "account" | "guild" | "proactive" | "danger";
 
 function isDmMessage(message: Message): boolean {
   return message.guildId == null;
@@ -605,7 +616,343 @@ export function parseDmSetupModal(customId: string): { userId: string; } | null 
   return { userId };
 }
 
-function canManageGuildInstallation(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): boolean {
+type SettingsPanelAction =
+  | "switch"
+  | "link-dm"
+  | "reset-dm"
+  | "link-guild"
+  | "enable-channel"
+  | "disable-channel"
+  | "toggle-unrestricted-default"
+  | "enable-unrestricted-here"
+  | "disable-unrestricted-here"
+  | "clear-unrestricted-override"
+  | "toggle-proactive-default"
+  | "enable-proactive-here"
+  | "disable-proactive-here"
+  | "clear-proactive-override"
+  | "reset-guild";
+
+interface SettingsPanelInteraction {
+  section: SettingsSection;
+  action: SettingsPanelAction;
+  targetChannelId: string | null;
+}
+
+interface SettingsPanelContext {
+  inGuild(): boolean;
+  guildId: string | null;
+  channelId: string;
+}
+
+function buildSettingsCustomId(section: SettingsSection, action: SettingsPanelAction, targetChannelId: string | null): string {
+  return `${SETTINGS_MODAL_PREFIX}:${section}:${action}:${targetChannelId ?? ""}`;
+}
+
+function parseSettingsCustomId(customId: string): SettingsPanelInteraction | null {
+  if (!customId.startsWith(`${SETTINGS_MODAL_PREFIX}:`)) return null;
+  const [, section, action, targetChannelId] = customId.split(":", 4);
+  if (!section || !action) return null;
+  if (section !== "overview" && section !== "account" && section !== "guild" && section !== "proactive" && section !== "danger") return null;
+  if (action !== "switch"
+    && action !== "link-dm"
+    && action !== "reset-dm"
+    && action !== "link-guild"
+    && action !== "enable-channel"
+    && action !== "disable-channel"
+    && action !== "toggle-unrestricted-default"
+    && action !== "enable-unrestricted-here"
+    && action !== "disable-unrestricted-here"
+    && action !== "clear-unrestricted-override"
+    && action !== "toggle-proactive-default"
+    && action !== "enable-proactive-here"
+    && action !== "disable-proactive-here"
+    && action !== "clear-proactive-override"
+    && action !== "reset-guild") {
+    return null;
+  }
+
+  return {
+    section: section as SettingsSection,
+    action: action as SettingsPanelAction,
+    targetChannelId: targetChannelId?.length ? targetChannelId : null
+  };
+}
+
+function getSettingsTargetChannelLabel(targetChannelId: string | null): string {
+  return targetChannelId ? `<#${targetChannelId}>` : "this channel";
+}
+
+function getSettingsTargetChannelId(interaction: ChatInputCommandInteraction, fallbackChannelId: string | null): string | null {
+  const channel = interaction.options.getChannel("channel");
+  const optionChannelId = channel && typeof channel === "object" && "id" in channel ? channel.id : null;
+  return optionChannelId ?? fallbackChannelId ?? interaction.channelId ?? null;
+}
+
+function canEditDmSettings(interaction: { user: { id: string; }; }, tenant: TenantReference): boolean {
+  return interaction.user.id === tenant.id;
+}
+
+function buildSettingsSectionOrder(isGuildContext: boolean): SettingsSection[] {
+  return isGuildContext
+    ? ["overview", "guild", "proactive", "danger"]
+    : ["overview", "account", "danger"];
+}
+
+function buildSettingsSectionTitle(section: SettingsSection): string {
+  switch (section) {
+    case "overview":
+      return "Overview";
+    case "account":
+      return "Account";
+    case "guild":
+      return "Guild";
+    case "proactive":
+      return "Proactive";
+    case "danger":
+      return "Danger Zone";
+  }
+}
+
+function buildSettingsOverviewDescription(context: SettingsPanelContext, tenant: TenantReference, targetChannelId: string | null): string {
+  if (context.inGuild()) {
+    return [
+      "Server settings are managed here.",
+      `Target channel: ${getSettingsTargetChannelLabel(targetChannelId)}.`,
+      "Use the Guild and Proactive sections to change server defaults or the selected channel.",
+      "The Danger Zone contains irreversible actions."
+    ].join(" ");
+  }
+
+  if (tenant.kind === "owner") {
+    return "This is the owner DM settings panel. Use it to manage the owner link or reset it.";
+  }
+
+  return "This is your personal DM settings panel. Use it to manage your linked account or reset it.";
+}
+
+function buildSettingsOverviewFieldValue(state: BridgeState, tenant: TenantReference, config: BridgeConfig, context: SettingsPanelContext, targetChannelId: string | null): string {
+  if (!context.inGuild()) {
+    return formatTenantStatus(state, tenant, config);
+  }
+
+  const guildId = context.guildId;
+  if (!guildId) return "This server is not set up yet.";
+  const installation = state.guildInstallations[guildId];
+  if (!installation) return "This server is not set up yet.";
+  const channelId = targetChannelId ?? context.channelId;
+  const channelLabel = getSettingsTargetChannelLabel(channelId);
+  const channelEnabled = isGuildChannelAllowed(state, guildId, channelId);
+  const unrestrictedMode = isGuildUnrestrictedRepliesAllowed(state, guildId, channelId);
+  const proactiveMode = isGuildProactiveRepliesAllowed(state, guildId, channelId);
+  const unrestrictedDisplay = installation.guildUnrestrictedChannelOverrides[channelId] == null
+    ? (installation.guildUnrestrictedRepliesEnabled ? "inherit (enabled)" : "inherit (disabled)")
+    : (installation.guildUnrestrictedChannelOverrides[channelId] ? "enabled" : "disabled");
+  const proactiveDisplay = installation.proactiveChannelOverrides[channelId] == null
+    ? (installation.proactiveRepliesEnabled ? "inherit (enabled)" : "inherit (disabled)")
+    : (installation.proactiveChannelOverrides[channelId] ? "enabled" : "disabled");
+  return [
+    `Channel access for ${channelLabel}: ${channelEnabled ? "enabled" : "disabled"}.`,
+    `Unrestricted mode for ${channelLabel}: ${unrestrictedDisplay} (${unrestrictedMode ? "active" : "inactive"}).`,
+    `Proactive replies for ${channelLabel}: ${proactiveDisplay} (${proactiveMode ? "active" : "inactive"}).`
+  ].join(" ");
+}
+
+function buildSettingsPanelEmbed(state: BridgeState, tenant: TenantReference, config: BridgeConfig, context: SettingsPanelContext, section: SettingsSection, targetChannelId: string | null): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setTitle(`Poke Settings · ${buildSettingsSectionTitle(section)}`)
+    .setDescription(buildSettingsOverviewDescription(context, tenant, targetChannelId))
+    .setColor(context.inGuild() ? 0x5865f2 : 0x2ecc71);
+
+  embed.addFields({
+    name: "Status",
+    value: buildSettingsOverviewFieldValue(state, tenant, config, context, targetChannelId)
+  });
+
+  if (context.inGuild()) {
+    const guildId = context.guildId;
+    const installation = guildId ? state.guildInstallations[guildId] : null;
+    if (installation) {
+      embed.addFields(
+        {
+          name: "Guild Default",
+          value: [
+            `Unrestricted: ${installation.guildUnrestrictedRepliesEnabled ? "on" : "off"}`,
+            `Proactive: ${installation.proactiveRepliesEnabled ? "on" : "off"}`
+          ].join("\n")
+        },
+        {
+          name: "Enabled Channels",
+          value: installation.allowedChannelIds.length
+            ? installation.allowedChannelIds.map(channelId => `<#${channelId}>`).join(", ")
+            : "None"
+        },
+        {
+          name: "Warning",
+          value: "Unrestricted mode relaxes the guild privacy guardrails. Only enable it in a trusted private server."
+        }
+      );
+    }
+  }
+
+  return embed;
+}
+
+function buildSettingsPanelComponents(state: BridgeState, tenant: TenantReference, context: SettingsPanelContext, section: SettingsSection, targetChannelId: string | null): ActionRowBuilder<ButtonBuilder>[] {
+  const isGuildContext = context.inGuild();
+  const tabs = buildSettingsSectionOrder(isGuildContext);
+  const tabRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    ...tabs.map(tab => new ButtonBuilder()
+      .setCustomId(buildSettingsCustomId(tab, "switch", targetChannelId))
+      .setLabel(buildSettingsSectionTitle(tab))
+      .setStyle(tab === section ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      .setDisabled(isGuildContext ? tab === "account" : tab !== "overview" && tab !== "account" && tab !== "danger"))
+  );
+
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [tabRow];
+
+  if (context.inGuild()) {
+    const guildId = context.guildId;
+    const installation = guildId ? state.guildInstallations[guildId] : null;
+    const currentChannelId = targetChannelId ?? context.channelId;
+    const channelAllowed = guildId ? isGuildChannelAllowed(state, guildId, currentChannelId) : false;
+    const channelExplicitlyAllowed = Boolean(installation?.allowedChannelIds.includes(currentChannelId));
+    const unrestrictedMode = guildId ? isGuildUnrestrictedRepliesAllowed(state, guildId, currentChannelId) : false;
+    const unrestrictedOverride = installation ? installation.guildUnrestrictedChannelOverrides[currentChannelId] : undefined;
+    const proactiveAllowed = guildId ? isGuildProactiveRepliesAllowed(state, guildId, currentChannelId) : false;
+    const proactiveOverride = installation ? installation.proactiveChannelOverrides[currentChannelId] : undefined;
+
+    if (section === "guild") {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "link-guild", currentChannelId))
+          .setLabel(installation ? "Re-link server" : "Set up server")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "enable-channel", currentChannelId))
+          .setLabel("Enable this channel")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!installation || channelExplicitlyAllowed),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "disable-channel", currentChannelId))
+          .setLabel("Disable this channel")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!installation || !channelExplicitlyAllowed),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "toggle-unrestricted-default", currentChannelId))
+          .setLabel(installation?.guildUnrestrictedRepliesEnabled ? "Turn unrestricted off" : "Turn unrestricted on")
+          .setStyle(installation?.guildUnrestrictedRepliesEnabled ? ButtonStyle.Danger : ButtonStyle.Success)
+          .setDisabled(!installation)
+      ));
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "enable-unrestricted-here", currentChannelId))
+          .setLabel("Enable unrestricted here")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!installation),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "disable-unrestricted-here", currentChannelId))
+          .setLabel("Disable unrestricted here")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!installation),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "clear-unrestricted-override", currentChannelId))
+          .setLabel("Use server default")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!installation || unrestrictedOverride == null)
+      ));
+    }
+
+    if (section === "proactive") {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "toggle-proactive-default", currentChannelId))
+          .setLabel(installation?.proactiveRepliesEnabled ? "Turn proactive off" : "Turn proactive on")
+          .setStyle(installation?.proactiveRepliesEnabled ? ButtonStyle.Danger : ButtonStyle.Success)
+          .setDisabled(!installation),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "enable-proactive-here", currentChannelId))
+          .setLabel("Enable here")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!installation || (proactiveAllowed === true && proactiveOverride == null)),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "disable-proactive-here", currentChannelId))
+          .setLabel("Disable here")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!installation || (proactiveAllowed === false && proactiveOverride == null)),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "clear-proactive-override", currentChannelId))
+          .setLabel("Use server default")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!installation || proactiveOverride == null)
+      ));
+    }
+
+    if (section === "danger") {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId(section, "reset-guild", currentChannelId))
+          .setLabel("Reset server installation")
+          .setStyle(ButtonStyle.Danger)
+      ));
+    }
+
+    if (section === "overview") {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId("guild", "switch", currentChannelId))
+          .setLabel("Guild")
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId("proactive", "switch", currentChannelId))
+          .setLabel("Proactive")
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId("danger", "switch", currentChannelId))
+          .setLabel("Danger")
+          .setStyle(ButtonStyle.Secondary)
+      ));
+    }
+  } else {
+    if (section === "account" || section === "overview") {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId("account", "link-dm", null))
+          .setLabel(tenant.kind === "owner" ? "Link owner account" : "Link account")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId("account", "reset-dm", null))
+          .setLabel("Reset link")
+          .setStyle(ButtonStyle.Danger)
+      ));
+    }
+
+    if (section === "danger") {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildSettingsCustomId("danger", "reset-dm", null))
+          .setLabel("Reset link")
+          .setStyle(ButtonStyle.Danger)
+      ));
+    }
+  }
+
+  return rows;
+}
+
+function buildSettingsPanel(state: BridgeState, tenant: TenantReference, config: BridgeConfig, context: SettingsPanelContext, section: SettingsSection, targetChannelId: string | null): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[]; } {
+  return {
+    embeds: [buildSettingsPanelEmbed(state, tenant, config, context, section, targetChannelId)],
+    components: buildSettingsPanelComponents(state, tenant, context, section, targetChannelId)
+  };
+}
+
+function canManageGuildInstallation(interaction: {
+  inGuild(): boolean;
+  guild?: { ownerId?: string | null; } | null;
+  user: { id: string; };
+  memberPermissions?: { has(permission: unknown, checkAdmin?: boolean): boolean; } | null;
+}): boolean {
   if (!interaction.inGuild()) return false;
   if (interaction.guild?.ownerId === interaction.user.id) return true;
   return interaction.memberPermissions?.has("Administrator") ?? false;
@@ -669,7 +1016,7 @@ function getTenantSecretState(state: BridgeState, tenant: TenantReference) {
 
 export function buildSetupLinkedMessage(state: BridgeState, tenant: TenantReference, config: BridgeConfig): string {
   const status = formatTenantStatus(state, tenant, config);
-  return `${status} Use /poke status if you want the full view, or /poke reset to relink.`;
+  return `${status} Open /poke settings if you want the full view or to relink.`;
 }
 
 export function isTenantLinked(state: BridgeState, tenant: TenantReference): boolean {
@@ -702,6 +1049,7 @@ async function buildDiscordRequestFromMessage(
   const attachments = getMessageAttachments(message);
   const contextMessages = contextMessagesOverride ?? (message.guildId == null ? [] : await collectChannelContext(message.channel, config.contextMessageCount));
   const replyTarget = buildReplyTarget(message.channelId, isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel), isDmMessage(message) ? "dm" : "guild");
+  const guildUnrestrictedRepliesEnabled = message.guildId ? isGuildUnrestrictedRepliesAllowed(state, message.guildId, message.channelId) : false;
 
   return {
     bridgeRequestId: randomUUID(),
@@ -712,6 +1060,7 @@ async function buildDiscordRequestFromMessage(
     mode: isDmMessage(message) ? "dm" : "guild",
     prompt: promptContent,
     replyTarget,
+    guildUnrestrictedRepliesEnabled,
     attachments,
     contextMessages,
     voiceContext: buildVoiceContext(
@@ -726,6 +1075,7 @@ async function buildDiscordRequestFromMessage(
 
 async function buildDiscordRequestFromInteraction(
   config: BridgeConfig,
+  state: BridgeState,
   interaction: ChatInputCommandInteraction,
   tenant: TenantReference,
   voiceManager: VoiceManager
@@ -733,6 +1083,7 @@ async function buildDiscordRequestFromInteraction(
   const attachments = getCommandAttachments(interaction);
   const contextMessages = interaction.inGuild() ? await collectChannelContext(interaction.channel, config.contextMessageCount) : [];
   const replyTarget = buildReplyTarget(interaction.channelId, getChannelLabel(interaction.channel) ?? (interaction.inGuild() ? "Server channel" : "Direct message"), interaction.inGuild() ? "guild" : "dm");
+  const guildUnrestrictedRepliesEnabled = interaction.inGuild() ? isGuildUnrestrictedRepliesAllowed(state, interaction.guildId, interaction.channelId) : false;
 
   return {
     bridgeRequestId: randomUUID(),
@@ -743,6 +1094,7 @@ async function buildDiscordRequestFromInteraction(
     mode: interaction.inGuild() ? "guild" : "dm",
     prompt: interaction.options.getString("message", true),
     replyTarget,
+    guildUnrestrictedRepliesEnabled,
     attachments,
     contextMessages,
     voiceContext: buildVoiceContext(
@@ -764,31 +1116,173 @@ async function respond(interaction: ChatInputCommandInteraction | ModalSubmitInt
   await interaction.reply({ content, ephemeral: interaction.inGuild() });
 }
 
+async function handleSettingsButtonInteraction(
+  interaction: ButtonInteraction,
+  config: BridgeConfig,
+  state: BridgeState,
+  updateState: (next: BridgeState) => Promise<void>,
+  tenant: TenantReference
+): Promise<boolean> {
+  const parsed = parseSettingsCustomId(interaction.customId);
+  if (!parsed) return false;
+
+  const currentSection = parsed.section;
+  const targetChannelId = parsed.targetChannelId;
+  const context = interaction;
+
+  const rerender = async (section: SettingsSection = currentSection): Promise<void> => {
+    await interaction.update(buildSettingsPanel(state, tenant, config, context, section, targetChannelId));
+  };
+
+  if (parsed.action === "switch") {
+    await rerender(currentSection);
+    return true;
+  }
+
+  if (parsed.action === "link-dm") {
+    if (!canEditDmSettings(interaction, tenant)) {
+      await interaction.reply({ content: "This DM settings panel is only for the linked account.", ephemeral: true });
+      return true;
+    }
+
+    await interaction.showModal(buildDmSetupModal(interaction.user.id));
+    return true;
+  }
+
+  if (parsed.action === "reset-dm") {
+    if (!canEditDmSettings(interaction, tenant)) {
+      await interaction.reply({ content: "This DM settings panel is only for the linked account.", ephemeral: true });
+      return true;
+    }
+
+    const nextState = tenant.kind === "owner" ? clearOwnerLink(state) : clearUserLink(state, interaction.user.id);
+    Object.assign(state, nextState);
+    await updateState(state);
+    await rerender("account");
+    return true;
+  }
+
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: "Guild settings can only be changed in a server.", ephemeral: true });
+    return true;
+  }
+
+  if (!canManageGuildInstallation(interaction)) {
+    await interaction.reply({ content: "Only the server owner or an administrator can change guild settings.", ephemeral: true });
+    return true;
+  }
+
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    await interaction.reply({ content: "This server is not available right now.", ephemeral: true });
+    return true;
+  }
+
+  const selectedChannelId = targetChannelId ?? interaction.channelId;
+  const installation = state.guildInstallations[guildId];
+
+  if (parsed.action === "link-guild") {
+    await interaction.showModal(buildGuildSetupModal(guildId, selectedChannelId, interaction.user.id));
+    return true;
+  }
+
+  if (!installation) {
+    await interaction.reply({ content: "This server is not set up yet. Use the Guild section to link it first.", ephemeral: true });
+    return true;
+  }
+
+  if (parsed.action === "enable-channel") {
+    Object.assign(state, setGuildChannelAccess(state, guildId, selectedChannelId, true));
+    await updateState(state);
+    await rerender("guild");
+    return true;
+  }
+
+  if (parsed.action === "disable-channel") {
+    Object.assign(state, setGuildChannelAccess(state, guildId, selectedChannelId, false));
+    await updateState(state);
+    await rerender("guild");
+    return true;
+  }
+
+  if (parsed.action === "toggle-unrestricted-default") {
+    Object.assign(state, setGuildUnrestrictedReplyMode(state, guildId, !installation.guildUnrestrictedRepliesEnabled));
+    await updateState(state);
+    await rerender("guild");
+    return true;
+  }
+
+  if (parsed.action === "enable-unrestricted-here") {
+    Object.assign(state, setGuildUnrestrictedChannelOverride(state, guildId, selectedChannelId, true));
+    await updateState(state);
+    await rerender("guild");
+    return true;
+  }
+
+  if (parsed.action === "disable-unrestricted-here") {
+    Object.assign(state, setGuildUnrestrictedChannelOverride(state, guildId, selectedChannelId, false));
+    await updateState(state);
+    await rerender("guild");
+    return true;
+  }
+
+  if (parsed.action === "clear-unrestricted-override") {
+    Object.assign(state, setGuildUnrestrictedChannelOverride(state, guildId, selectedChannelId, null));
+    await updateState(state);
+    await rerender("guild");
+    return true;
+  }
+
+  if (parsed.action === "toggle-proactive-default") {
+    Object.assign(state, setGuildProactiveReplyMode(state, guildId, !installation.proactiveRepliesEnabled));
+    await updateState(state);
+    await rerender("proactive");
+    return true;
+  }
+
+  if (parsed.action === "enable-proactive-here") {
+    Object.assign(state, setGuildProactiveChannelOverride(state, guildId, selectedChannelId, true));
+    await updateState(state);
+    await rerender("proactive");
+    return true;
+  }
+
+  if (parsed.action === "disable-proactive-here") {
+    Object.assign(state, setGuildProactiveChannelOverride(state, guildId, selectedChannelId, false));
+    await updateState(state);
+    await rerender("proactive");
+    return true;
+  }
+
+  if (parsed.action === "clear-proactive-override") {
+    Object.assign(state, setGuildProactiveChannelOverride(state, guildId, selectedChannelId, null));
+    await updateState(state);
+    await rerender("proactive");
+    return true;
+  }
+
+  if (parsed.action === "reset-guild") {
+    Object.assign(state, removeGuildInstallation(state, guildId));
+    await updateState(state);
+    await interaction.update(buildSettingsPanel(state, tenant, config, context, "overview", selectedChannelId));
+    return true;
+  }
+
+  return false;
+}
+
 async function handleDmMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>, voiceManager: VoiceManager): Promise<void> {
   const tenant = getTenantForDm(config, message.author.id);
   const command = readCommand(message.content);
   const tenantSecret = getTenantSecretState(state, tenant);
 
-  if (command === "setup") {
-    await sendTextMessage(message.channel, "Use /poke setup in this DM to open the link modal.");
-    return;
-  }
-
-  if (command === "status") {
-    await sendTextMessage(message.channel, formatTenantStatus(state, tenant, config));
-    return;
-  }
-
-  if (command === "reset") {
-    const nextState = tenant.kind === "owner" ? clearOwnerLink(state) : clearUserLink(state, message.author.id);
-    Object.assign(state, nextState);
-    await updateState(state);
-    await sendTextMessage(message.channel, "Link cleared.");
+  if (command === "setup" || command === "status" || command === "reset") {
+    await sendTextMessage(message.channel, "Use /poke settings in this DM to manage your account link.");
     return;
   }
 
   if (!tenantSecret?.encryptedPokeApiKey) {
-    await sendTextMessage(message.channel, "Use /poke setup in this DM to link this account.");
+    await sendTextMessage(message.channel, "Use /poke settings in this DM to link this account.");
     return;
   }
 
@@ -825,14 +1319,14 @@ async function handleGuildMessage(message: Message, config: BridgeConfig, state:
   });
 
   if (isDisableRequest(message.content) && (mentioned || repliedToBot || isPokeCallout(message.content))) {
-    await sendTextMessage(message.channel, "An administrator can turn off proactive replies with /poke proactive disable.");
+    await sendTextMessage(message.channel, "An administrator can turn off proactive replies from /poke settings.");
     return;
   }
 
   if (!decision.shouldRelay) return;
 
   if (!tenantSecret?.encryptedPokeApiKey) {
-    await sendTextMessage(message.channel, "This server is not set up yet. An administrator should run /poke setup.");
+    await sendTextMessage(message.channel, "This server is not set up yet. An administrator should open /poke settings.");
     return;
   }
 
@@ -868,7 +1362,7 @@ async function registerCommands(client: Client): Promise<void> {
 function createSlashCommand() {
   const command = new SlashCommandBuilder()
     .setName(COMMAND_NAME)
-    .setDescription("Send a message to Poke.");
+    .setDescription("Send a message to Poke or open settings.");
 
   command
     .addSubcommand(subcommand => subcommand
@@ -884,46 +1378,13 @@ function createSlashCommand() {
       .addAttachmentOption(option => option.setName("attachment4").setDescription("Optional attachment 4.").setRequired(false))
       .addAttachmentOption(option => option.setName("attachment5").setDescription("Optional attachment 5.").setRequired(false)))
     .addSubcommand(subcommand => subcommand
-      .setName("setup")
-      .setDescription("Enable Poke in this server channel.")
+      .setName("settings")
+      .setDescription("Open the Poke settings panel.")
       .addChannelOption(option => option
         .setName("channel")
-        .setDescription("Channel to enable. Defaults to the current channel.")
+        .setDescription("Channel to manage. Defaults to the current channel.")
         .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
         .setRequired(false)))
-    .addSubcommand(subcommand => subcommand
-      .setName("status")
-      .setDescription("Show the current bridge status."))
-    .addSubcommand(subcommand => subcommand
-      .setName("reset")
-      .setDescription("Reset the current bridge link or server installation."))
-    .addSubcommandGroup(group => group
-      .setName("proactive")
-      .setDescription("Manage proactive replies in guilds.")
-      .addSubcommand(subcommand => subcommand
-        .setName("status")
-        .setDescription("Show proactive reply status for this server or channel.")
-        .addChannelOption(option => option
-          .setName("channel")
-          .setDescription("Optional channel to inspect.")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false)))
-      .addSubcommand(subcommand => subcommand
-        .setName("enable")
-        .setDescription("Enable proactive replies for this server or a channel.")
-        .addChannelOption(option => option
-          .setName("channel")
-          .setDescription("Optional channel override.")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false)))
-      .addSubcommand(subcommand => subcommand
-        .setName("disable")
-        .setDescription("Disable proactive replies for this server or a channel.")
-        .addChannelOption(option => option
-          .setName("channel")
-          .setDescription("Optional channel override.")
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-          .setRequired(false))));
 
   return command.setContexts([InteractionContextType.Guild, InteractionContextType.BotDM]).setIntegrationTypes([ApplicationIntegrationType.GuildInstall]).setDMPermission(true);
 }
@@ -964,7 +1425,7 @@ export async function startDiscordBot(
         const dmParsed = parseDmSetupModal(interaction.customId);
         if (dmParsed) {
           if (interaction.inGuild()) {
-            await interaction.reply({ content: "Use /poke setup in a DM.", ephemeral: true });
+            await interaction.reply({ content: "Use /poke settings in a DM.", ephemeral: true });
             return;
           }
           if (interaction.user.id !== dmParsed.userId) {
@@ -996,7 +1457,7 @@ export async function startDiscordBot(
         const parsed = parseGuildSetupModal(interaction.customId);
         if (!parsed) return;
         if (!interaction.inGuild()) {
-          await interaction.reply({ content: "Use /poke setup in a server.", ephemeral: true });
+          await interaction.reply({ content: "Use /poke settings in a server.", ephemeral: true });
           return;
         }
         if (!canManageGuildInstallation(interaction)) {
@@ -1022,105 +1483,28 @@ export async function startDiscordBot(
         return;
       }
 
+      if (interaction.isButton()) {
+        const tenant = interaction.inGuild() ? getTenantForGuild(interaction.guildId) : getTenantForDm(config, interaction.user.id);
+        if (await handleSettingsButtonInteraction(interaction, config, state, updateState, tenant)) {
+          return;
+        }
+      }
+
       if (!interaction.isChatInputCommand() || interaction.commandName !== COMMAND_NAME) return;
 
-      const subcommandGroup = interaction.options.getSubcommandGroup(false);
       const subcommand = interaction.options.getSubcommand();
       const tenant = interaction.inGuild() ? getTenantForGuild(interaction.guildId) : getTenantForDm(config, interaction.user.id);
-
-      if (subcommandGroup === "proactive") {
-        if (!interaction.inGuild()) {
-          await respond(interaction, "Use proactive reply settings in a server.");
+      if (subcommand === "settings") {
+        const targetChannelId = interaction.inGuild() ? getSettingsTargetChannelId(interaction, interaction.channelId) : null;
+        if (interaction.inGuild() && !canManageGuildInstallation(interaction)) {
+          await respond(interaction, "Only the server owner or an administrator can open guild settings.");
           return;
         }
 
-        const channelOption = interaction.options.getChannel("channel");
-        const channelId = channelOption && typeof channelOption === "object" && "id" in channelOption ? channelOption.id : null;
-
-        if (subcommand === "status") {
-          await respond(interaction, formatGuildProactiveStatus(state, interaction.guildId, channelId ?? interaction.channelId));
-          return;
-        }
-
-        if (!canManageGuildInstallation(interaction)) {
-          await respond(interaction, "Only the server owner or an administrator can change proactive reply settings.");
-          return;
-        }
-
-        if (subcommand === "enable") {
-          Object.assign(state, channelId
-            ? setGuildProactiveChannelOverride(state, interaction.guildId, channelId, true)
-            : setGuildProactiveReplyMode(state, interaction.guildId, true));
-          await updateState(state);
-          await respond(interaction, channelId ? `Proactive replies enabled in <#${channelId}>.` : "Proactive replies enabled for this server.");
-          return;
-        }
-
-        if (subcommand === "disable") {
-          Object.assign(state, channelId
-            ? setGuildProactiveChannelOverride(state, interaction.guildId, channelId, false)
-            : setGuildProactiveReplyMode(state, interaction.guildId, false));
-          await updateState(state);
-          await respond(interaction, channelId ? `Proactive replies disabled in <#${channelId}>.` : "Proactive replies disabled for this server.");
-          return;
-        }
-
-        return;
-      }
-
-      if (subcommand === "setup") {
-        if (isTenantLinked(state, tenant)) {
-          await respond(interaction, buildSetupLinkedMessage(state, tenant, config));
-          return;
-        }
-
-        if (!interaction.inGuild()) {
-          await interaction.showModal(buildDmSetupModal(interaction.user.id));
-          return;
-        }
-        if (!canManageGuildInstallation(interaction)) {
-          await interaction.reply({ content: "Only the server owner or an administrator can set this up.", ephemeral: true });
-          return;
-        }
-
-        const channel = interaction.options.getChannel("channel");
-        const targetChannelId = channel && typeof channel === "object" && "id" in channel ? channel.id : interaction.channelId;
-        await interaction.showModal(buildGuildSetupModal(interaction.guildId, targetChannelId, interaction.user.id));
-        return;
-      }
-
-      if (subcommand === "status") {
-        await respond(interaction, formatTenantStatus(state, tenant, config));
-        return;
-      }
-
-      if (subcommand === "reset") {
-        if (tenant.kind === "owner") {
-          Object.assign(state, clearOwnerLink(state));
-          await updateState(state);
-          await respond(interaction, "Owner link cleared.");
-          return;
-        }
-
-        if (tenant.kind === "user") {
-          Object.assign(state, clearUserLink(state, interaction.user.id));
-          await updateState(state);
-          await respond(interaction, "User link cleared.");
-          return;
-        }
-
-        if (!interaction.inGuild()) {
-          await respond(interaction, "Use /poke reset in a server.");
-          return;
-        }
-        if (!canManageGuildInstallation(interaction)) {
-          await respond(interaction, "Only the server owner or an administrator can reset the installation.");
-          return;
-        }
-
-        Object.assign(state, removeGuildInstallation(state, interaction.guildId));
-        await updateState(state);
-        await respond(interaction, "Server installation removed.");
+        await interaction.reply({
+          ...buildSettingsPanel(state, tenant, config, interaction, interaction.inGuild() ? "overview" : "account", targetChannelId),
+          ephemeral: interaction.inGuild()
+        });
         return;
       }
 
@@ -1134,14 +1518,14 @@ export async function startDiscordBot(
 
       if (!tenantSecret?.encryptedPokeApiKey) {
         await respond(interaction, tenant.kind === "guild"
-          ? "This server is not set up yet. An administrator should run /poke setup."
+          ? "This server is not set up yet. An administrator should open /poke settings."
           : "Paste your Poke API key in this DM to link this account.");
         return;
       }
 
       await interaction.deferReply({ ephemeral: interaction.inGuild() });
 
-      const request = await buildDiscordRequestFromInteraction(config, interaction as ChatInputCommandInteraction, tenant, voiceManager);
+      const request = await buildDiscordRequestFromInteraction(config, state, interaction as ChatInputCommandInteraction, tenant, voiceManager);
       request.prompt = buildDiscordRelayPrompt(request);
       await onRelayRequest(request);
       await interaction.editReply("Sent to Poke.");
