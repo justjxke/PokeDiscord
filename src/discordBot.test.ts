@@ -14,6 +14,15 @@ import {
 import type { BridgeState, GuildInstallationState } from "./types";
 
 function makeGuildInstallation(overrides: Partial<GuildInstallationState> = {}): GuildInstallationState {
+  const {
+    guildUnrestrictedRepliesEnabled,
+    guildUnrestrictedChannelOverrides,
+    proactiveRepliesEnabled,
+    proactiveChannelOverrides,
+    proactiveConversationState,
+    ...rest
+  } = overrides;
+
   return {
     installedByUserId: "user-1",
     installedAt: Date.now(),
@@ -21,10 +30,12 @@ function makeGuildInstallation(overrides: Partial<GuildInstallationState> = {}):
     linkedAt: Date.now(),
     allowedChannelIds: ["channel-123"],
     encryptedPokeApiKey: null,
-    proactiveRepliesEnabled: true,
-    proactiveChannelOverrides: {},
-    proactiveConversationState: {},
-    ...overrides
+    guildUnrestrictedRepliesEnabled: guildUnrestrictedRepliesEnabled ?? false,
+    guildUnrestrictedChannelOverrides: guildUnrestrictedChannelOverrides ?? {},
+    proactiveRepliesEnabled: proactiveRepliesEnabled ?? true,
+    proactiveChannelOverrides: proactiveChannelOverrides ?? {},
+    proactiveConversationState: proactiveConversationState ?? {},
+    ...rest
   };
 }
 

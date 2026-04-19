@@ -897,22 +897,6 @@ function buildSettingsPanelComponents(state: BridgeState, tenant: TenantReferenc
       ));
     }
 
-    if (section === "overview") {
-      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(buildSettingsCustomId("guild", "switch", currentChannelId))
-          .setLabel("Guild")
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId(buildSettingsCustomId("proactive", "switch", currentChannelId))
-          .setLabel("Proactive")
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(buildSettingsCustomId("danger", "switch", currentChannelId))
-          .setLabel("Danger")
-          .setStyle(ButtonStyle.Secondary)
-      ));
-    }
   } else {
     if (section === "account" || section === "overview") {
       rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
